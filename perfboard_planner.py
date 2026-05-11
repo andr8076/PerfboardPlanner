@@ -30,6 +30,8 @@ class Component:
     color: str
     side: str = "front"
     rotation: int = 0  # visual component body angle in degrees
+    show_name: bool = True
+    show_pin_names: bool = True
     pins: List[ComponentPin] = field(default_factory=list)
     jumpers: List[ComponentJumper] = field(default_factory=list)
 
@@ -209,6 +211,8 @@ class PerfboardPlanner(tk.Tk):
             color=comp.color,
             side=comp.side if side is None else side,
             rotation=cls.normalized_angle(getattr(comp, "rotation", 0)),
+            show_name=bool(getattr(comp, "show_name", True)),
+            show_pin_names=bool(getattr(comp, "show_pin_names", True)),
             pins=cls.copy_pins(comp.pins),
             jumpers=cls.copy_jumpers(comp.jumpers),
         )
@@ -552,7 +556,7 @@ class PerfboardPlanner(tk.Tk):
         ).pack(anchor="w", pady=(6, 0))
 
         ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
-        ttk.Label(view_tab, text="Component labels", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(view_tab, text="Global component labels", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         label_row = ttk.Frame(view_tab)
         label_row.pack(anchor="w", fill=tk.X, pady=(5, 0))
         ttk.Checkbutton(
@@ -1037,6 +1041,10 @@ class PerfboardPlanner(tk.Tk):
         wire_color_var = tk.StringVar(value=self.current_wire_color.get())
         apply_angle = tk.BooleanVar(value=False)
         angle_var = tk.IntVar(value=self.current_component_rotation.get())
+        apply_show_name = tk.BooleanVar(value=False)
+        show_name_bulk_var = tk.BooleanVar(value=True)
+        apply_show_pin_names = tk.BooleanVar(value=False)
+        show_pin_names_bulk_var = tk.BooleanVar(value=True)
 
         body = ttk.Frame(win, padding=10)
         body.pack(fill=tk.BOTH, expand=True)
@@ -1067,6 +1075,12 @@ class PerfboardPlanner(tk.Tk):
             row += 1
             ttk.Checkbutton(body, text="Set body angle", variable=apply_angle).grid(row=row, column=0, sticky="w", pady=2)
             ttk.Combobox(body, textvariable=angle_var, values=[0, 45, 90, 135, 180, 225, 270, 315], state="readonly", width=8).grid(row=row, column=1, sticky="w", pady=2)
+            row += 1
+            ttk.Checkbutton(body, text="Set component name visibility", variable=apply_show_name).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Checkbutton(body, text="Show names", variable=show_name_bulk_var).grid(row=row, column=1, sticky="w", pady=2)
+            row += 1
+            ttk.Checkbutton(body, text="Set pin name visibility", variable=apply_show_pin_names).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Checkbutton(body, text="Show pin names", variable=show_pin_names_bulk_var).grid(row=row, column=1, sticky="w", pady=2)
             row += 1
             ttk.Button(body, text="Rotate selected 90° clockwise", command=lambda: (self.rotate_selected_components(), win.destroy())).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 2))
             row += 1
@@ -1100,6 +1114,10 @@ class PerfboardPlanner(tk.Tk):
                     comp.color = comp_color_var.get() or "#ffcc66"
                 if apply_angle.get():
                     comp.rotation = self.normalized_angle(angle_var.get())
+                if apply_show_name.get():
+                    comp.show_name = bool(show_name_bulk_var.get())
+                if apply_show_pin_names.get():
+                    comp.show_pin_names = bool(show_pin_names_bulk_var.get())
             for idx in wire_indices:
                 if not (0 <= idx < len(self.wires)):
                     continue
@@ -1303,6 +1321,8 @@ class PerfboardPlanner(tk.Tk):
         color_var = tk.StringVar(value=comp.color)
         side_var = tk.StringVar(value=comp.side)
         rotation_var = tk.IntVar(value=self.normalized_angle(getattr(comp, "rotation", 0)))
+        show_name_var = tk.BooleanVar(value=bool(getattr(comp, "show_name", True)))
+        show_pin_names_var = tk.BooleanVar(value=bool(getattr(comp, "show_pin_names", True)))
         edit_pins: List[ComponentPin] = self.copy_pins(comp.pins)
         edit_jumpers: List[ComponentJumper] = self.copy_jumpers(comp.jumpers)
         pin_summary = tk.StringVar(value="")
@@ -1358,9 +1378,15 @@ class PerfboardPlanner(tk.Tk):
 
         ttk.Button(body, text="Choose…", command=choose_color).grid(row=6, column=2, sticky="ew", padx=(6, 0), pady=2)
 
-        ttk.Separator(body).grid(row=7, column=0, columnspan=3, sticky="ew", pady=10)
-        ttk.Label(body, text="Attachment pins", font=("TkDefaultFont", 11, "bold")).grid(row=8, column=0, columnspan=3, sticky="w")
-        ttk.Label(body, textvariable=pin_summary).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Label(body, text="Labels").grid(row=7, column=0, sticky="w", pady=2)
+        label_frame = ttk.Frame(body)
+        label_frame.grid(row=7, column=1, columnspan=2, sticky="w", pady=2)
+        ttk.Checkbutton(label_frame, text="Show component name", variable=show_name_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(label_frame, text="Show pin names", variable=show_pin_names_var).pack(side=tk.LEFT, padx=(12, 0))
+
+        ttk.Separator(body).grid(row=8, column=0, columnspan=3, sticky="ew", pady=10)
+        ttk.Label(body, text="Attachment pins", font=("TkDefaultFont", 11, "bold")).grid(row=9, column=0, columnspan=3, sticky="w")
+        ttk.Label(body, textvariable=pin_summary).grid(row=10, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
         def read_size() -> Tuple[int, int]:
             try:
@@ -1391,7 +1417,7 @@ class PerfboardPlanner(tk.Tk):
 
             self.open_pin_editor(f"Pin layout: {name_var.get() or comp.name}", width, height, pins, apply_pins, jumpers=edit_jumpers)
 
-        ttk.Button(body, text="Edit pins…", command=edit_pins_action).grid(row=10, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        ttk.Button(body, text="Edit pins…", command=edit_pins_action).grid(row=11, column=0, columnspan=3, sticky="ew", pady=(2, 0))
 
         for variable in (width_var, height_var):
             variable.trace_add("write", update_pin_summary)
@@ -1428,6 +1454,8 @@ class PerfboardPlanner(tk.Tk):
             edited.color = color_var.get() or "#ffcc66"
             edited.side = side
             edited.rotation = self.normalized_angle(rotation_var.get())
+            edited.show_name = bool(show_name_var.get())
+            edited.show_pin_names = bool(show_pin_names_var.get())
             edited.pins = self.normalized_pins(edit_pins, width, height)
             edited.jumpers = self.normalized_jumpers(edit_jumpers, edited.pins)
 
@@ -2338,7 +2366,7 @@ class PerfboardPlanner(tk.Tk):
                     stipple="gray50",
                     tags=tags,
                 )
-                if self.show_component_names.get():
+                if self.show_component_names.get() and bool(getattr(comp, "show_name", True)):
                     self.canvas.create_text(
                         cx,
                         cy,
@@ -2361,7 +2389,7 @@ class PerfboardPlanner(tk.Tk):
                 width=width,
                 tags=("component", f"component:{i}"),
             )
-            if self.show_component_names.get():
+            if self.show_component_names.get() and bool(getattr(comp, "show_name", True)):
                 angle_text = f"  {self.normalized_angle(getattr(comp, 'rotation', 0))}°" if self.normalized_angle(getattr(comp, 'rotation', 0)) else ""
                 self.canvas.create_text(
                     cx,
@@ -2442,7 +2470,7 @@ class PerfboardPlanner(tk.Tk):
                     dash=(max(2, round(3 * self.zoom)), max(2, round(2 * self.zoom))),
                     tags=("ghost_pin", f"ghost_pin:{component_index}:{pin_index}"),
                 )
-                if self.show_component_pin_names.get() and self.zoom >= 1.35:
+                if self.show_component_pin_names.get() and bool(getattr(comp, "show_pin_names", True)) and self.zoom >= 1.35:
                     self.canvas.create_text(
                         x + 7 * self.zoom,
                         y - 8 * self.zoom,
@@ -2502,7 +2530,7 @@ class PerfboardPlanner(tk.Tk):
                 self.canvas.create_oval(x - vr, y - vr, x + vr, y + vr, fill="", outline="#ff0000", width=max(2, round(3 * self.zoom)), tags=pin_tags)
             self.draw_pin_connection_badge(x, y, count, violation, pin_tags)
 
-            if self.show_component_pin_names.get() and (selected or self.zoom >= 1.15):
+            if self.show_component_pin_names.get() and bool(getattr(comp, "show_pin_names", True)) and (selected or self.zoom >= 1.15):
                 text_fill = "#ffffff" if selected else "#111111"
                 if wire_colors:
                     # Small white backing keeps pin names readable when they sit
@@ -3165,6 +3193,8 @@ class PerfboardPlanner(tk.Tk):
                 self.current_color.get(),
                 side=self.current_side.get(),
                 rotation=self.normalized_angle(self.current_component_rotation.get()),
+                show_name=True,
+                show_pin_names=True,
                 pins=self.copy_pins(pins),
                 jumpers=self.normalized_jumpers(self.component_jumper_template, pins),
             ))
@@ -3687,6 +3717,8 @@ class PerfboardPlanner(tk.Tk):
                     c.get("color", "#ffcc66"),
                     side=c.get("side", "front"),
                     rotation=self.normalized_angle(c.get("rotation", 0)),
+                    show_name=bool(c.get("show_name", True)),
+                    show_pin_names=bool(c.get("show_pin_names", True)),
                     pins=normalized_pins,
                     jumpers=self.normalized_jumpers(jumpers, normalized_pins),
                 ))
@@ -3741,6 +3773,8 @@ class PerfboardPlanner(tk.Tk):
                 c.get("color", "#ffcc66"),
                 side=c.get("side", "front"),
                 rotation=self.normalized_angle(c.get("rotation", 0)),
+                show_name=bool(c.get("show_name", True)),
+                show_pin_names=bool(c.get("show_pin_names", True)),
                 pins=normalized_pins,
                 jumpers=self.normalized_jumpers(jumpers, normalized_pins),
             ))
@@ -4139,7 +4173,7 @@ class PerfboardPlanner(tk.Tk):
         comp = self.components[indices[0]]
         path = filedialog.asksaveasfilename(title="Save footprint", defaultextension=".json", filetypes=[("Perfboard footprint", "*.json"), ("All files", "*.*")])
         if not path: return
-        data = {"version": 1, "type": "perfboard_footprint", "name": comp.name, "width": comp.width, "height": comp.height, "color": comp.color, "rotation": comp.rotation, "pins": [asdict(p) for p in self.normalized_pins(comp.pins, comp.width, comp.height)], "jumpers": [asdict(j) for j in self.normalized_jumpers(comp.jumpers, comp.pins)]}
+        data = {"version": 1, "type": "perfboard_footprint", "name": comp.name, "width": comp.width, "height": comp.height, "color": comp.color, "rotation": comp.rotation, "show_name": bool(getattr(comp, "show_name", True)), "show_pin_names": bool(getattr(comp, "show_pin_names", True)), "pins": [asdict(p) for p in self.normalized_pins(comp.pins, comp.width, comp.height)], "jumpers": [asdict(j) for j in self.normalized_jumpers(comp.jumpers, comp.pins)]}
         with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
         self.status.set(f"Footprint saved: {path}")
 
