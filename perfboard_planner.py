@@ -44,6 +44,14 @@ class Wire:
     lane: int = 0  # visual parallel offset; saved layout still snaps to real holes
 
 
+@dataclass
+class Via:
+    row: int
+    col: int
+    name: str = ""
+    color: str = "#9c27b0"
+
+
 class PerfboardPlanner(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -63,6 +71,29 @@ class PerfboardPlanner(tk.Tk):
 
         self.components: List[Component] = []
         self.wires: List[Wire] = []
+        self.vias: List[Via] = []
+
+        # Undo/redo and net tracing. The view is always physical: when viewing
+        # the back side, the whole board is mirrored left/right to match the
+        # real board after flipping it over.
+        self.undo_stack: List[Dict[str, Any]] = []
+        self.redo_stack: List[Dict[str, Any]] = []
+        self._suspend_undo = False
+        self.highlighted_nodes: Set[Tuple[str, int, int]] = set()
+        self.warning_pins: Set[Tuple[int, str]] = set()
+        self.warning_holes: Set[Tuple[str, int, int]] = set()
+        self.warning_outside_pins: Set[Tuple[int, str]] = set()
+        self.warning_overlap_components: Set[int] = set()
+        self.warning_overlap_pairs: List[Tuple[int, int]] = []
+        self.warning_wire_points: Set[Tuple[int, int]] = set()
+        self.warning_vias: Set[int] = set()
+        self.layout_warning_text = tk.StringVar(value="Layout OK")
+        self.show_layout_warnings = tk.BooleanVar(value=True)
+        self.show_pin_connection_counts = tk.BooleanVar(value=True)
+        self.pin_connection_limit = tk.IntVar(value=2)
+        self.pin_connection_count_both_sides = tk.BooleanVar(value=True)
+        self.pin_connection_limit.trace_add("write", lambda *_: self.redraw() if hasattr(self, "canvas") else None)
+        self._last_state: Optional[Dict[str, Any]] = None
 
         # Dual-sided board support. New components and wires are created on
         # current_side. The other side can be drawn as a ghost/see-through
@@ -123,6 +154,11 @@ class PerfboardPlanner(tk.Tk):
                 "label": "DRAW WIRE",
                 "color": "#b00020",
                 "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire. Overlaps are separated automatically. Pin markers show which wires terminate on component pins. Bridge gaps mean crossing without connection; solder dots mean shared-hole connection.",
+            },
+            "via": {
+                "label": "ADD VIA",
+                "color": "#7b1fa2",
+                "hint": "Click a hole to toggle a through-board via. A via intentionally connects the front and back side at that hole.",
             },
             "label": {
                 "label": "TEXT LABEL",
@@ -357,7 +393,13 @@ class PerfboardPlanner(tk.Tk):
         ttk.Button(tool_tab, text="Edit selected items…", command=self.edit_selected_items).pack(fill=tk.X, pady=2)
         ttk.Button(tool_tab, text="Delete selected", command=self.delete_selected).pack(fill=tk.X, pady=2)
         ttk.Button(tool_tab, text="Send selected to other side", command=self.move_selected_to_other_side).pack(fill=tk.X, pady=2)
+        ttk.Button(tool_tab, text="Swap all front/back sides", command=self.swap_all_sides).pack(fill=tk.X, pady=2)
         ttk.Button(tool_tab, text="Rotate selected component(s)", command=self.rotate_selected_components).pack(fill=tk.X, pady=2)
+        ttk.Button(tool_tab, text="Undo", command=self.undo).pack(fill=tk.X, pady=(8, 2))
+        ttk.Button(tool_tab, text="Redo", command=self.redo).pack(fill=tk.X, pady=2)
+        ttk.Button(tool_tab, text="Trace selected net", command=self.trace_selected_net).pack(fill=tk.X, pady=(8, 2))
+        ttk.Button(tool_tab, text="Clear net highlight", command=self.clear_net_highlight).pack(fill=tk.X, pady=2)
+        ttk.Button(tool_tab, text="Run layout checks", command=self.run_layout_checks).pack(fill=tk.X, pady=(8, 2))
 
         ttk.Separator(tool_tab).pack(fill=tk.X, pady=10)
         ttk.Label(
@@ -401,6 +443,10 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(part_tab, textvariable=self.pin_count_label).pack(anchor="w", pady=(4, 2))
         ttk.Button(part_tab, text="Edit new-component pins", command=self.edit_new_component_pins).pack(fill=tk.X, pady=2)
         ttk.Button(part_tab, text="Edit selected pins", command=self.edit_selected_component_pins).pack(fill=tk.X, pady=2)
+        ttk.Separator(part_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(part_tab, text="Footprint library", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(part_tab, text="Save selected as footprint", command=self.save_selected_footprint).pack(fill=tk.X, pady=(5, 2))
+        ttk.Button(part_tab, text="Load footprint as template", command=self.load_footprint_template).pack(fill=tk.X, pady=2)
 
         # --- Wire tab -----------------------------------------------------
         ttk.Label(wire_tab, text="New wires", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
@@ -472,6 +518,13 @@ class PerfboardPlanner(tk.Tk):
         board_row.pack(anchor="w", pady=5, fill=tk.X)
         ttk.Button(board_row, text="Resize", command=self.resize_board).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(board_row, text="Clear", command=self.clear_board).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        ttk.Button(view_tab, text="Swap all front/back sides", command=self.swap_all_sides).pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(
+            view_tab,
+            text="The backside is always shown as a physical flipped view: left/right is mirrored to match the real board in your hand.",
+            justify=tk.LEFT,
+            wraplength=270,
+        ).pack(anchor="w", pady=(4, 0))
 
         ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
         ttk.Label(view_tab, text="Other side ghost layers", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
@@ -514,6 +567,44 @@ class PerfboardPlanner(tk.Tk):
             width=10,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
 
+        ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(view_tab, text="Pin connection counts", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        count_row = ttk.Frame(view_tab)
+        count_row.pack(anchor="w", fill=tk.X, pady=(5, 0))
+        ttk.Checkbutton(
+            count_row,
+            text="Show counts",
+            variable=self.show_pin_connection_counts,
+            command=self.redraw,
+            style="Toolbutton",
+            width=12,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Checkbutton(
+            count_row,
+            text="Both sides",
+            variable=self.pin_connection_count_both_sides,
+            command=self.redraw,
+            style="Toolbutton",
+            width=12,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        max_row = ttk.Frame(view_tab)
+        max_row.pack(anchor="w", fill=tk.X, pady=(5, 0))
+        ttk.Label(max_row, text="Max per pin").pack(side=tk.LEFT)
+        ttk.Spinbox(max_row, from_=0, to=20, textvariable=self.pin_connection_limit, width=5, command=self.redraw).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Checkbutton(
+            view_tab,
+            text="Highlight layout warnings",
+            variable=self.show_layout_warnings,
+            command=self.redraw,
+            style="Toolbutton",
+        ).pack(anchor="w", fill=tk.X, pady=(5, 0))
+        ttk.Label(
+            view_tab,
+            text="A red count badge means the pin is above the max. Both sides makes the count include front/back wires at the same physical hole.",
+            justify=tk.LEFT,
+            wraplength=270,
+        ).pack(anchor="w", pady=(5, 0))
+
         # --- File tab -----------------------------------------------------
         ttk.Label(file_tab, text="File", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         ttk.Button(file_tab, text="New", command=self.new_file).pack(fill=tk.X, pady=(5, 2))
@@ -544,13 +635,13 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(file_tab, text=help_text, justify=tk.LEFT, wraplength=270).pack(anchor="w", pady=4)
 
         quickbar = ttk.Frame(side_outer, padding=(8, 6))
-        quickbar.grid(row=3, column=0, sticky="ew")
+        quickbar.grid(row=4, column=0, sticky="ew")
         quickbar.columnconfigure(0, weight=1)
 
         ttk.Label(quickbar, text="Mode", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
         mode_tabs = ttk.Frame(quickbar)
         mode_tabs.pack(fill=tk.X, pady=(2, 6))
-        for text_label, value in [("Select", "select"), ("Part", "component"), ("Wire", "wire"), ("Text", "label")]:
+        for text_label, value in [("Select", "select"), ("Part", "component"), ("Wire", "wire"), ("Via", "via"), ("Text", "label")]:
             ttk.Radiobutton(
                 mode_tabs,
                 text=text_label,
@@ -618,9 +709,20 @@ class PerfboardPlanner(tk.Tk):
         for column, button in enumerate(layer_buttons):
             button.grid(row=0, column=column, sticky="ew", padx=(0, 2 if column < len(layer_buttons) - 1 else 0))
 
+        self.layout_warning_label = tk.Label(
+            side_outer,
+            textvariable=self.layout_warning_text,
+            anchor="w",
+            justify=tk.LEFT,
+            padx=8,
+            pady=5,
+            fg="#0b6f2a",
+        )
+        self.layout_warning_label.grid(row=1, column=0, sticky="ew")
+
         self.status = tk.StringVar(value="Ready")
-        ttk.Label(side_outer, textvariable=self.status, wraplength=315, padding=8).grid(row=1, column=0, sticky="ew")
-        ttk.Separator(side_outer).grid(row=2, column=0, sticky="ew")
+        ttk.Label(side_outer, textvariable=self.status, wraplength=315, padding=8).grid(row=2, column=0, sticky="ew")
+        ttk.Separator(side_outer).grid(row=3, column=0, sticky="ew")
 
         board_area = ttk.Frame(main_pane)
         main_pane.add(board_area, minsize=380)
@@ -687,6 +789,12 @@ class PerfboardPlanner(tk.Tk):
         self.canvas.bind("<Control-V>", self.paste_component)
         self.canvas.bind("<Control-d>", self.duplicate_selected_component)
         self.canvas.bind("<Control-D>", self.duplicate_selected_component)
+        self.canvas.bind("<Control-z>", self.undo)
+        self.canvas.bind("<Control-Z>", self.undo)
+        self.canvas.bind("<Control-y>", self.redo)
+        self.canvas.bind("<Control-Y>", self.redo)
+        self.canvas.bind("<Key-h>", self.trace_selected_net)
+        self.canvas.bind("<Key-H>", self.trace_selected_net)
         self.canvas.bind("<Key-r>", self.rotate_selected_components)
         self.canvas.bind("<Key-R>", self.rotate_selected_components)
         self.safe_bind(self.canvas, "<Command-c>", self.copy_selected_component)
@@ -709,6 +817,12 @@ class PerfboardPlanner(tk.Tk):
         self.bind("<Control-V>", self.paste_component)
         self.bind("<Control-d>", self.duplicate_selected_component)
         self.bind("<Control-D>", self.duplicate_selected_component)
+        self.bind("<Control-z>", self.undo)
+        self.bind("<Control-Z>", self.undo)
+        self.bind("<Control-y>", self.redo)
+        self.bind("<Control-Y>", self.redo)
+        self.bind("<Key-h>", self.trace_selected_net)
+        self.bind("<Key-H>", self.trace_selected_net)
         self.bind("<Key-r>", self.rotate_selected_components)
         self.bind("<Key-R>", self.rotate_selected_components)
         self.safe_bind(self, "<Command-c>", self.copy_selected_component)
@@ -1640,7 +1754,7 @@ class PerfboardPlanner(tk.Tk):
         self.cancel_temp_wire()
         self.clear_selection()
         self._update_mode_ui()
-        self.status.set(f"Viewing {self.current_side_label()} side. New items are placed on this side.")
+        self.status.set(f"Viewing {self.current_side_label()} side as a physical flipped board. New items are placed on this side.")
         self.redraw()
 
     def toggle_layer_display(self):
@@ -1733,7 +1847,7 @@ class PerfboardPlanner(tk.Tk):
         if not hasattr(self, "mode_banner"):
             return
         style = self._mode_style()
-        side = self.current_side_label().upper()
+        side = (self.current_side_label() + (" — PHYSICAL MIRROR" if self.current_side.get() == "back" else "")).upper()
         visible_ghosts = []
         if self.show_opposite_layer.get():
             visible_ghosts.append("parts")
@@ -1824,16 +1938,33 @@ class PerfboardPlanner(tk.Tk):
     def scaled_hole_radius(self) -> float:
         return max(2.0, self.hole_radius * self.zoom)
 
+    def display_col_for_view(self, col: int) -> int:
+        # Physical-view rule: the back side is always shown as the real board
+        # after flipping it over, so left/right is mirrored. Logical layout data
+        # is not changed; only the view/click mapping is mirrored.
+        col = int(col)
+        if self.current_side.get() == "back":
+            return self.cols - 1 - col
+        return col
+
+    def logical_col_from_display(self, display_col: int) -> int:
+        display_col = int(display_col)
+        if self.current_side.get() == "back":
+            return self.cols - 1 - display_col
+        return display_col
+
     def grid_to_xy(self, row: int, col: int) -> Tuple[float, float]:
         spacing = self.scaled_spacing()
         margin = self.scaled_margin()
-        return margin + col * spacing, margin + row * spacing
+        display_col = self.display_col_for_view(col)
+        return margin + display_col * spacing, margin + row * spacing
 
     def xy_to_grid(self, x: int, y: int) -> Optional[Tuple[int, int]]:
         spacing = self.scaled_spacing()
         margin = self.scaled_margin()
-        col = round((x - margin) / spacing)
+        display_col = round((x - margin) / spacing)
         row = round((y - margin) / spacing)
+        col = self.logical_col_from_display(display_col)
         if 0 <= row < self.rows and 0 <= col < self.cols:
             hx, hy = self.grid_to_xy(row, col)
             if abs(x - hx) <= spacing * 0.45 and abs(y - hy) <= spacing * 0.45:
@@ -1911,10 +2042,13 @@ class PerfboardPlanner(tk.Tk):
         return "break"
 
     def redraw(self):
+        self.maybe_capture_undo_state()
+        self.update_layout_warning_sets()
         self._update_mode_ui()
         self.canvas.delete("all")
         self.recompute_auto_wire_spacing()
         self.draw_board()
+        self.draw_vias()
 
         # Draw the non-active side first as a ghost layer. It is visible but not
         # editable/selectable while this side is active.
@@ -1930,6 +2064,8 @@ class PerfboardPlanner(tk.Tk):
         self.draw_wires(side=active, ghost=False)
         self.draw_wire_connection_markers(side=active)
         self.draw_components(side=active, ghost=False)
+        self.draw_layout_warnings()
+        self.draw_net_highlight()
         self.draw_temp_wire()
         bbox = self.canvas.bbox("all")
         if bbox:
@@ -1975,7 +2111,10 @@ class PerfboardPlanner(tk.Tk):
         cy = (y1 + y2) / 2
         half_w = abs(x2 - x1) / 2 + pad
         half_h = abs(y2 - y1) / 2 + pad
-        angle = math.radians(self.normalized_angle(getattr(comp, "rotation", 0)))
+        visual_angle = self.normalized_angle(getattr(comp, "rotation", 0))
+        if self.current_side.get() == "back":
+            visual_angle = -visual_angle
+        angle = math.radians(visual_angle)
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
         points = [(-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)]
@@ -2182,6 +2321,14 @@ class PerfboardPlanner(tk.Tk):
                     width=max(1, round(2 * self.zoom)),
                     tags=pin_tags,
                 )
+
+            count = self.pin_connection_count(comp, pin)
+            limit = self.pin_connection_limit_value()
+            violation = count > limit
+            if violation and self.show_layout_warnings.get():
+                vr = max(r + 6 * self.zoom, 11 * self.zoom)
+                self.canvas.create_oval(x - vr, y - vr, x + vr, y + vr, fill="", outline="#ff0000", width=max(2, round(3 * self.zoom)), tags=pin_tags)
+            self.draw_pin_connection_badge(x, y, count, violation, pin_tags)
 
             if self.show_component_pin_names.get() and (selected or self.zoom >= 1.15):
                 text_fill = "#ffffff" if selected else "#111111"
@@ -2872,6 +3019,20 @@ class PerfboardPlanner(tk.Tk):
             self.redraw()
             return
 
+        if mode == "via":
+            if grid is None:
+                return
+            row, col = grid
+            existing = next((i for i, via in enumerate(self.vias) if via.row == row and via.col == col), None)
+            if existing is None:
+                self.vias.append(Via(row, col))
+                self.status.set(f"Via added at row {row + 1}, col {col + 1}.")
+            else:
+                del self.vias[existing]
+                self.status.set(f"Via removed at row {row + 1}, col {col + 1}.")
+            self.redraw()
+            return
+
         if mode == "label":
             if grid is None:
                 return
@@ -3237,6 +3398,38 @@ class PerfboardPlanner(tk.Tk):
         self.status.set(f"Moved {moved} item{'s' if moved != 1 else ''} to {self.current_side_label()} side.")
         self.redraw()
 
+    def swap_all_sides(self):
+        total_components = len(self.components)
+        total_wires = len(self.wires)
+        total_items = total_components + total_wires
+        if total_items == 0:
+            self.status.set("There is nothing to swap.")
+            return
+
+        if not messagebox.askyesno(
+            "Swap front/back sides",
+            "Move every front-side item to the back, and every back-side item to the front?\n\n"
+            "Coordinates are kept the same; this does not mirror the board left/right.\n\n"
+            f"Components: {total_components}\nWires: {total_wires}",
+        ):
+            return
+
+        def flipped(side):
+            return "front" if side == "back" else "back"
+
+        for comp in self.components:
+            comp.side = flipped(getattr(comp, "side", "front"))
+        for wire in self.wires:
+            wire.side = flipped(getattr(wire, "side", "front"))
+
+        self.clear_selection()
+        self._update_mode_ui()
+        self.status.set(
+            f"Swapped {total_components} component{'s' if total_components != 1 else ''} "
+            f"and {total_wires} wire{'s' if total_wires != 1 else ''} between front/back."
+        )
+        self.redraw()
+
     def resize_board(self):
         rows = simpledialog.askinteger("Rows", "Number of rows:", initialvalue=self.rows, minvalue=5, maxvalue=100)
         if rows is None:
@@ -3252,6 +3445,7 @@ class PerfboardPlanner(tk.Tk):
         if messagebox.askyesno("Clear board", "Remove all components and wires?"):
             self.components.clear()
             self.wires.clear()
+            self.vias.clear()
             self.clear_selection()
             self.redraw()
 
@@ -3259,6 +3453,7 @@ class PerfboardPlanner(tk.Tk):
         if messagebox.askyesno("New file", "Start a new layout?"):
             self.components.clear()
             self.wires.clear()
+            self.vias.clear()
             self.rows = 30
             self.cols = 45
             self.clear_selection()
@@ -3273,10 +3468,11 @@ class PerfboardPlanner(tk.Tk):
         if not path:
             return
         data = {
-            "version": 8,
+            "version": 10,
             "board": {"rows": self.rows, "cols": self.cols, "spacing": self.spacing},
             "components": [asdict(c) for c in self.components],
             "wires": [asdict(w) for w in self.wires],
+            "vias": [asdict(v) for v in self.vias],
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -3322,10 +3518,463 @@ class PerfboardPlanner(tk.Tk):
                 layer="main",
                 lane=self.clamp_wire_lane(w.get("lane", 0)),
             ) for w in data.get("wires", [])]
+            self.vias = [Via(int(v.get("row", 0)), int(v.get("col", 0)), v.get("name", ""), v.get("color", "#9c27b0")) for v in data.get("vias", [])]
             self.clear_selection()
+            self._last_state = self.snapshot_state()
+            self.undo_stack.clear()
+            self.redo_stack.clear()
             self.redraw()
         except Exception as exc:
             messagebox.showerror("Open failed", str(exc))
+
+
+    # ------------------------------------------------------------------
+    # State history, vias, nets, checks, and footprint library
+    # ------------------------------------------------------------------
+    def snapshot_state(self) -> Dict[str, Any]:
+        return {
+            "rows": int(self.rows),
+            "cols": int(self.cols),
+            "spacing": int(self.spacing),
+            "components": [asdict(c) for c in self.components],
+            "wires": [asdict(w) for w in self.wires],
+            "vias": [asdict(v) for v in self.vias],
+        }
+
+    def restore_state(self, state: Dict[str, Any]):
+        self.rows = int(state.get("rows", self.rows))
+        self.cols = int(state.get("cols", self.cols))
+        self.spacing = int(state.get("spacing", self.spacing))
+        self.components = []
+        for c in state.get("components", []):
+            pins = [ComponentPin(pin.get("name", ""), int(pin.get("row", 0)), int(pin.get("col", 0))) for pin in c.get("pins", [])]
+            jumpers = [ComponentJumper(j.get("pin_a", ""), j.get("pin_b", ""), j.get("color", "#00aaff")) for j in c.get("jumpers", [])]
+            normalized_pins = self.normalized_pins(pins, int(c.get("width", 1)), int(c.get("height", 1)))
+            self.components.append(Component(
+                c.get("name", "Part"),
+                int(c.get("row", 0)),
+                int(c.get("col", 0)),
+                int(c.get("width", 1)),
+                int(c.get("height", 1)),
+                c.get("color", "#ffcc66"),
+                side=c.get("side", "front"),
+                rotation=self.normalized_angle(c.get("rotation", 0)),
+                pins=normalized_pins,
+                jumpers=self.normalized_jumpers(jumpers, normalized_pins),
+            ))
+        self.wires = [Wire(
+            w.get("name", ""),
+            [tuple(p) for p in w.get("points", [])],
+            w.get("color", "#d00000"),
+            side=w.get("side", "front"),
+            layer="main",
+            lane=self.clamp_wire_lane(w.get("lane", 0)),
+        ) for w in state.get("wires", [])]
+        self.vias = [Via(int(v.get("row", 0)), int(v.get("col", 0)), v.get("name", ""), v.get("color", "#9c27b0")) for v in state.get("vias", [])]
+        self.clear_selection()
+
+    def maybe_capture_undo_state(self):
+        if getattr(self, "_suspend_undo", False):
+            return
+        current = self.snapshot_state()
+        if self._last_state is None:
+            self._last_state = current
+            return
+        if current != self._last_state:
+            self.undo_stack.append(self._last_state)
+            if len(self.undo_stack) > 100:
+                self.undo_stack.pop(0)
+            self.redo_stack.clear()
+            self._last_state = current
+
+    def undo(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        if not self.undo_stack:
+            self.status.set("Nothing to undo.")
+            return "break"
+        current = self.snapshot_state()
+        previous = self.undo_stack.pop()
+        self.redo_stack.append(current)
+        self._suspend_undo = True
+        try:
+            self.restore_state(previous)
+            self._last_state = self.snapshot_state()
+            self.status.set("Undo.")
+            self.redraw()
+        finally:
+            self._suspend_undo = False
+        return "break"
+
+    def redo(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        if not self.redo_stack:
+            self.status.set("Nothing to redo.")
+            return "break"
+        current = self.snapshot_state()
+        next_state = self.redo_stack.pop()
+        self.undo_stack.append(current)
+        self._suspend_undo = True
+        try:
+            self.restore_state(next_state)
+            self._last_state = self.snapshot_state()
+            self.status.set("Redo.")
+            self.redraw()
+        finally:
+            self._suspend_undo = False
+        return "break"
+
+    def draw_vias(self):
+        for i, via in enumerate(self.vias):
+            if not (0 <= via.row < self.rows and 0 <= via.col < self.cols):
+                continue
+            x, y = self.grid_to_xy(via.row, via.col)
+            r_outer = max(5.5, 7.5 * self.zoom)
+            r_inner = max(2.5, 3.5 * self.zoom)
+            self.canvas.create_oval(x - r_outer, y - r_outer, x + r_outer, y + r_outer, fill="", outline=via.color or "#9c27b0", width=max(2, round(2.5 * self.zoom)), tags=("via", f"via:{i}"))
+            self.canvas.create_oval(x - r_inner, y - r_inner, x + r_inner, y + r_inner, fill=via.color or "#9c27b0", outline="#ffffff", width=max(1, round(1 * self.zoom)), tags=("via", f"via:{i}"))
+            if via.name and self.zoom >= 1.2:
+                self.canvas.create_text(x + 8 * self.zoom, y + 8 * self.zoom, text=via.name, anchor="w", fill="#111111", font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"), tags=("via", f"via:{i}"))
+
+    def grid_points_on_wire(self, wire: Wire) -> Set[Tuple[int, int]]:
+        pts: Set[Tuple[int, int]] = set()
+        raw = [(int(r), int(c)) for r, c in wire.points]
+        for p in raw:
+            pts.add(p)
+        for (r1, c1), (r2, c2) in zip(raw, raw[1:]):
+            if r1 == r2:
+                step = 1 if c2 >= c1 else -1
+                for c in range(c1, c2 + step, step):
+                    pts.add((r1, c))
+            elif c1 == c2:
+                step = 1 if r2 >= r1 else -1
+                for r in range(r1, r2 + step, step):
+                    pts.add((r, c1))
+            else:
+                pts.add((r1, c1)); pts.add((r2, c2))
+        return pts
+
+    def build_connectivity_graph(self) -> Dict[Tuple[str, int, int], Set[Tuple[str, int, int]]]:
+        graph: Dict[Tuple[str, int, int], Set[Tuple[str, int, int]]] = {}
+        def add_node(node): graph.setdefault(node, set())
+        def link(a, b):
+            graph.setdefault(a, set()).add(b)
+            graph.setdefault(b, set()).add(a)
+        for wire in self.wires:
+            side = getattr(wire, "side", "front")
+            pts = sorted(self.grid_points_on_wire(wire))
+            nodes = [(side, r, c) for r, c in pts]
+            for node in nodes: add_node(node)
+            if nodes:
+                first = nodes[0]
+                for node in nodes[1:]: link(first, node)
+        for comp in self.components:
+            side = getattr(comp, "side", "front")
+            pin_nodes: Dict[str, Tuple[str, int, int]] = {}
+            for pin in self.normalized_pins(comp.pins, comp.width, comp.height):
+                node = (side, int(comp.row + pin.row), int(comp.col + pin.col))
+                pin_nodes[pin.name] = node
+                add_node(node)
+            for jumper in self.normalized_jumpers(comp.jumpers, comp.pins):
+                if jumper.pin_a in pin_nodes and jumper.pin_b in pin_nodes: link(pin_nodes[jumper.pin_a], pin_nodes[jumper.pin_b])
+        for via in self.vias:
+            if 0 <= via.row < self.rows and 0 <= via.col < self.cols: link(("front", via.row, via.col), ("back", via.row, via.col))
+        return graph
+
+    def connected_component_from_node(self, start: Tuple[str, int, int]) -> Set[Tuple[str, int, int]]:
+        graph = self.build_connectivity_graph()
+        if start not in graph: return {start}
+        seen = {start}; stack = [start]
+        while stack:
+            node = stack.pop()
+            for other in graph.get(node, set()):
+                if other not in seen:
+                    seen.add(other); stack.append(other)
+        return seen
+
+    def selected_start_node(self) -> Optional[Tuple[str, int, int]]:
+        if self.selected_kind == "wire" and self.selected_index is not None and 0 <= self.selected_index < len(self.wires):
+            wire = self.wires[self.selected_index]
+            if wire.points:
+                row, col = wire.points[0]
+                return (wire.side, int(row), int(col))
+        if self.selected_kind == "component" and self.selected_index is not None and 0 <= self.selected_index < len(self.components):
+            comp = self.components[self.selected_index]
+            pins = self.normalized_pins(comp.pins, comp.width, comp.height)
+            if pins:
+                pin = pins[0]
+                return (comp.side, int(comp.row + pin.row), int(comp.col + pin.col))
+        return None
+
+    def trace_selected_net(self, event=None):
+        if event is not None and self.event_from_text_input(event): return
+        start = self.selected_start_node()
+        if start is None:
+            self.status.set("Select a wire or component first, then trace the net.")
+            return "break"
+        self.highlighted_nodes = self.connected_component_from_node(start)
+        self.status.set(f"Highlighted net: {len(self.highlighted_nodes)} connected hole point{'s' if len(self.highlighted_nodes) != 1 else ''}.")
+        self.redraw(); return "break"
+
+    def clear_net_highlight(self, event=None):
+        self.highlighted_nodes.clear(); self.status.set("Net highlight cleared."); self.redraw(); return "break"
+
+    def draw_net_highlight(self):
+        if not self.highlighted_nodes: return
+        active_side = self.current_side.get()
+        for side, row, col in sorted(self.highlighted_nodes):
+            if side != active_side or not (0 <= row < self.rows and 0 <= col < self.cols): continue
+            x, y = self.grid_to_xy(row, col)
+            r = max(8.0, 10.0 * self.zoom)
+            self.canvas.create_oval(x-r, y-r, x+r, y+r, fill="", outline="#ffff00", width=max(2, round(3 * self.zoom)), tags=("net_highlight",))
+
+    def wire_count_at_physical_hole(self, side: str, row: int, col: int) -> int:
+        target = (int(row), int(col))
+        return sum(1 for wire in self.wires if wire.side == side and target in self.grid_points_on_wire(wire))
+
+    def pin_connection_count(self, comp: Component, pin: ComponentPin) -> int:
+        row = int(comp.row + pin.row); col = int(comp.col + pin.col)
+        sides = ("front", "back") if self.pin_connection_count_both_sides.get() else (comp.side,)
+        count = sum(self.wire_count_at_physical_hole(side, row, col) for side in sides)
+        if any(via.row == row and via.col == col for via in self.vias): count += 1
+        for jumper in self.normalized_jumpers(comp.jumpers, comp.pins):
+            if jumper.pin_a == pin.name or jumper.pin_b == pin.name: count += 1
+        return count
+
+    def pin_connection_limit_value(self) -> int:
+        try: return max(0, int(self.pin_connection_limit.get()))
+        except Exception: return 0
+
+    def draw_pin_connection_badge(self, x: float, y: float, count: int, violation: bool, tags: Tuple[str, ...]):
+        if not self.show_pin_connection_counts.get(): return
+        if count == 0 and not violation: return
+        bx = x - 8 * self.zoom; by = y + 9 * self.zoom; r = max(5.5, 7.0 * self.zoom)
+        fill = "#ffdddd" if violation else "#ffffff"; outline = "#d00000" if violation else "#111111"; text_fill = "#a00000" if violation else "#111111"
+        self.canvas.create_oval(bx-r, by-r, bx+r, by+r, fill=fill, outline=outline, width=max(1, round(2 * self.zoom)) if violation else max(1, round(1 * self.zoom)), tags=tags)
+        self.canvas.create_text(bx, by, text=str(count), fill=text_fill, font=("TkDefaultFont", max(6, round(7 * self.zoom)), "bold"), tags=tags)
+
+    def component_body_cells(self, comp: Component) -> Set[Tuple[int, int]]:
+        cells: Set[Tuple[int, int]] = set()
+        for row in range(int(comp.row), int(comp.row) + max(1, int(comp.height))):
+            for col in range(int(comp.col), int(comp.col) + max(1, int(comp.width))):
+                cells.add((row, col))
+        return cells
+
+    def component_bodies_overlap(self, a: Component, b: Component) -> bool:
+        if a.side != b.side:
+            return False
+        return not (
+            a.col + a.width - 1 < b.col
+            or b.col + b.width - 1 < a.col
+            or a.row + a.height - 1 < b.row
+            or b.row + b.height - 1 < a.row
+        )
+
+    def update_layout_warning_sets(self):
+        self.warning_pins.clear()
+        self.warning_holes.clear()
+        self.warning_outside_pins.clear()
+        self.warning_overlap_components.clear()
+        self.warning_overlap_pairs.clear()
+        self.warning_wire_points.clear()
+        self.warning_vias.clear()
+
+        limit = self.pin_connection_limit_value()
+        for ci, comp in enumerate(self.components):
+            for pin in self.normalized_pins(comp.pins, comp.width, comp.height):
+                row = int(comp.row + pin.row)
+                col = int(comp.col + pin.col)
+                if not (0 <= row < self.rows and 0 <= col < self.cols):
+                    self.warning_outside_pins.add((ci, pin.name))
+                count = self.pin_connection_count(comp, pin)
+                if count > limit:
+                    self.warning_pins.add((ci, pin.name))
+                    sides = ("front", "back") if self.pin_connection_count_both_sides.get() else (comp.side,)
+                    for side in sides:
+                        self.warning_holes.add((side, row, col))
+
+        for i, a in enumerate(self.components):
+            for j in range(i + 1, len(self.components)):
+                b = self.components[j]
+                if self.component_bodies_overlap(a, b):
+                    self.warning_overlap_components.add(i)
+                    self.warning_overlap_components.add(j)
+                    self.warning_overlap_pairs.append((i, j))
+
+        for wi, wire in enumerate(self.wires):
+            for row, col in wire.points:
+                if not (0 <= int(row) < self.rows and 0 <= int(col) < self.cols):
+                    self.warning_wire_points.add((wi, len(self.warning_wire_points)))
+                    break
+
+        for vi, via in enumerate(self.vias):
+            if not (0 <= int(via.row) < self.rows and 0 <= int(via.col) < self.cols):
+                self.warning_vias.add(vi)
+
+        self.update_layout_warning_text()
+
+    def layout_warning_messages(self) -> List[str]:
+        messages: List[str] = []
+        if self.warning_pins:
+            messages.append(f"Pin connection limit violations: {len(self.warning_pins)}")
+        if self.warning_outside_pins:
+            messages.append(f"Pins outside board: {len(self.warning_outside_pins)}")
+        if self.warning_overlap_pairs:
+            messages.append(f"Same-side component body overlaps: {len(self.warning_overlap_pairs)}")
+        if self.warning_wire_points:
+            messages.append(f"Wires with points outside board: {len(self.warning_wire_points)}")
+        if self.warning_vias:
+            messages.append(f"Vias outside board: {len(self.warning_vias)}")
+        return messages
+
+    def update_layout_warning_text(self):
+        messages = self.layout_warning_messages()
+        if messages:
+            text = "Layout warnings: " + "; ".join(messages[:3])
+            if len(messages) > 3:
+                text += f"; +{len(messages) - 3} more"
+            color = "#a00000"
+        else:
+            text = "Layout OK"
+            color = "#0b6f2a"
+        if hasattr(self, "layout_warning_text"):
+            self.layout_warning_text.set(text)
+        if hasattr(self, "layout_warning_label"):
+            try:
+                self.layout_warning_label.configure(fg=color)
+            except tk.TclError:
+                pass
+
+    def visible_warning_sides(self) -> Set[str]:
+        sides = {self.current_side.get()}
+        opposite = self.other_side()
+        if self.show_opposite_layer.get() or self.show_opposite_pins.get() or self.show_opposite_wires.get():
+            sides.add(opposite)
+        return sides
+
+    def draw_layout_warnings(self):
+        if not self.show_layout_warnings.get():
+            return
+        visible_sides = self.visible_warning_sides()
+        current = self.current_side.get()
+        warning_color = "#ff0000"
+        warning_width = max(2, round(3 * self.zoom))
+        warning_dash = (max(3, round(6 * self.zoom)), max(2, round(4 * self.zoom)))
+
+        # Component overlap warnings: red dashed outline on every overlapping body.
+        for ci in sorted(self.warning_overlap_components):
+            if not (0 <= ci < len(self.components)):
+                continue
+            comp = self.components[ci]
+            if comp.side not in visible_sides:
+                continue
+            pad = self.scaled_spacing() * 0.50
+            polygon = self.component_body_polygon(comp, pad)
+            self.canvas.create_polygon(
+                *self.flatten_points(polygon),
+                fill="",
+                outline=warning_color,
+                width=warning_width,
+                dash=warning_dash,
+                tags=("layout_warning", f"layout_warning_component:{ci}"),
+            )
+
+        # Pin limit warnings: ring the exact hole/pin position, even if pin names/counts are hidden.
+        for side, row, col in sorted(self.warning_holes):
+            if side not in visible_sides:
+                continue
+            if not (-20 <= row < self.rows + 20 and -20 <= col < self.cols + 20):
+                continue
+            x, y = self.grid_to_xy(row, col)
+            r = max(8.0, 11.0 * self.zoom)
+            self.canvas.create_oval(
+                x - r,
+                y - r,
+                x + r,
+                y + r,
+                fill="",
+                outline=warning_color,
+                width=warning_width,
+                dash=warning_dash,
+                tags=("layout_warning",),
+            )
+
+        # Pins outside the board: draw a red X and a small label at the invalid pin position.
+        for ci, pin_name in sorted(self.warning_outside_pins):
+            if not (0 <= ci < len(self.components)):
+                continue
+            comp = self.components[ci]
+            if comp.side not in visible_sides:
+                continue
+            pin = next((p for p in self.normalized_pins(comp.pins, comp.width, comp.height) if p.name == pin_name), None)
+            if pin is None:
+                continue
+            row = int(comp.row + pin.row)
+            col = int(comp.col + pin.col)
+            if not (-20 <= row < self.rows + 20 and -20 <= col < self.cols + 20):
+                continue
+            x, y = self.grid_to_xy(row, col)
+            size = max(6.0, 8.0 * self.zoom)
+            self.canvas.create_line(x - size, y - size, x + size, y + size, fill=warning_color, width=warning_width, tags=("layout_warning",))
+            self.canvas.create_line(x - size, y + size, x + size, y - size, fill=warning_color, width=warning_width, tags=("layout_warning",))
+            if self.zoom >= 0.75:
+                self.canvas.create_text(
+                    x + 10 * self.zoom,
+                    y - 10 * self.zoom,
+                    text="outside",
+                    anchor="w",
+                    fill=warning_color,
+                    font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"),
+                    tags=("layout_warning",),
+                )
+
+        # Bad vias are rare, but JSON edits can create them. Mark them loudly.
+        for vi in sorted(self.warning_vias):
+            if not (0 <= vi < len(self.vias)):
+                continue
+            via = self.vias[vi]
+            if not (-20 <= via.row < self.rows + 20 and -20 <= via.col < self.cols + 20):
+                continue
+            x, y = self.grid_to_xy(via.row, via.col)
+            r = max(9.0, 12.0 * self.zoom)
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="", outline=warning_color, width=warning_width, dash=warning_dash, tags=("layout_warning",))
+            self.canvas.create_text(x + r, y - r, text="bad via", anchor="w", fill=warning_color, font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"), tags=("layout_warning",))
+
+    def run_layout_checks(self):
+        self.update_layout_warning_sets()
+        messages = self.layout_warning_messages()
+        if not messages:
+            messages = ["No obvious layout warnings found."]
+        self.status.set("; ".join(messages))
+        messagebox.showinfo("Layout checks", "\n".join(messages))
+        self.redraw()
+
+    def save_selected_footprint(self):
+        indices = self.component_indices_in_selection()
+        if not indices:
+            self.status.set("Select one component first, then save it as a footprint."); return
+        comp = self.components[indices[0]]
+        path = filedialog.asksaveasfilename(title="Save footprint", defaultextension=".json", filetypes=[("Perfboard footprint", "*.json"), ("All files", "*.*")])
+        if not path: return
+        data = {"version": 1, "type": "perfboard_footprint", "name": comp.name, "width": comp.width, "height": comp.height, "color": comp.color, "rotation": comp.rotation, "pins": [asdict(p) for p in self.normalized_pins(comp.pins, comp.width, comp.height)], "jumpers": [asdict(j) for j in self.normalized_jumpers(comp.jumpers, comp.pins)]}
+        with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
+        self.status.set(f"Footprint saved: {path}")
+
+    def load_footprint_template(self):
+        path = filedialog.askopenfilename(title="Load footprint", filetypes=[("Perfboard footprint", "*.json"), ("All files", "*.*")])
+        if not path: return
+        try:
+            with open(path, "r", encoding="utf-8") as f: data = json.load(f)
+            w = int(data.get("width", 1)); h = int(data.get("height", 1))
+            pins = [ComponentPin(p.get("name", ""), int(p.get("row", 0)), int(p.get("col", 0))) for p in data.get("pins", [])]
+            jumpers = [ComponentJumper(j.get("pin_a", ""), j.get("pin_b", ""), j.get("color", "#00aaff")) for j in data.get("jumpers", [])]
+            normalized_pins = self.normalized_pins(pins, w, h)
+            self.component_w.set(w); self.component_h.set(h); self.current_name.set(data.get("name", "Part")); self.current_color.set(data.get("color", "#ffcc66")); self.current_component_rotation.set(self.normalized_angle(data.get("rotation", 0)))
+            self.component_pin_template = self.copy_pins(normalized_pins); self.component_jumper_template = self.normalized_jumpers(jumpers, normalized_pins)
+            self.mode.set("component"); self._mode_changed(); self.status.set("Footprint loaded as new-component template.")
+        except Exception as exc:
+            messagebox.showerror("Load footprint failed", str(exc))
 
     def export_png(self):
         path = filedialog.asksaveasfilename(
