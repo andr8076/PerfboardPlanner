@@ -30,9 +30,14 @@ class PerfboardPlanner(tk.Tk):
 
         self.rows = 30
         self.cols = 45
+        # Base board geometry. Zoom only changes how this is drawn on screen;
+        # it does not change the saved board layout.
         self.spacing = 22
         self.margin = 35
         self.hole_radius = 4
+        self.zoom = 1.0
+        self.min_zoom = 0.45
+        self.max_zoom = 2.75
 
         self.components: List[Component] = []
         self.wires: List[Wire] = []
@@ -110,6 +115,14 @@ class PerfboardPlanner(tk.Tk):
         ttk.Button(board_row, text="Resize", command=self.resize_board).pack(side=tk.LEFT)
         ttk.Button(board_row, text="Clear", command=self.clear_board).pack(side=tk.LEFT, padx=5)
 
+        zoom_row = ttk.Frame(side)
+        zoom_row.pack(anchor="w", pady=(2, 4), fill=tk.X)
+        ttk.Button(zoom_row, text="−", width=3, command=lambda: self.zoom_step(1 / 1.15)).pack(side=tk.LEFT)
+        self.zoom_label = tk.StringVar(value="100%")
+        ttk.Label(zoom_row, textvariable=self.zoom_label, width=7, anchor="center").pack(side=tk.LEFT, padx=4)
+        ttk.Button(zoom_row, text="+", width=3, command=lambda: self.zoom_step(1.15)).pack(side=tk.LEFT)
+        ttk.Button(zoom_row, text="Reset", command=self.reset_zoom).pack(side=tk.LEFT, padx=(5, 0))
+
         ttk.Separator(side).pack(fill=tk.X, pady=10)
 
         ttk.Label(side, text="File", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
@@ -123,6 +136,9 @@ class PerfboardPlanner(tk.Tk):
         help_text = (
             "Use the holes as snap points.\n\n"
             "View:\n"
+            "  Ctrl + wheel = zoom\n"
+            "  + / - = zoom in/out\n"
+            "  0 = reset zoom\n"
             "  middle-drag = pan\n"
             "  right-drag = pan, except while finishing a wire\n"
             "  mouse wheel = vertical scroll\n"
@@ -188,6 +204,10 @@ class PerfboardPlanner(tk.Tk):
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
         self.canvas.bind("<Button-4>", self.on_linux_wheel_up)
         self.canvas.bind("<Button-5>", self.on_linux_wheel_down)
+        self.canvas.bind("<Key-plus>", self.zoom_in_key)
+        self.canvas.bind("<Key-equal>", self.zoom_in_key)
+        self.canvas.bind("<Key-minus>", self.zoom_out_key)
+        self.canvas.bind("<Key-0>", self.reset_zoom_key)
         # Keyboard actions work after the canvas has focus. The canvas takes focus
         # whenever the user clicks the board, so these do not hijack text editing in
         # the sidebar fields.
@@ -199,9 +219,14 @@ class PerfboardPlanner(tk.Tk):
         self.bind("<BackSpace>", self.delete_selected)
         self.bind("<Escape>", self.cancel_temp_wire)
         self.bind("<Return>", lambda event: self.finish_temp_wire(event, ask_name=True))
+        self.bind("<Key-plus>", self.zoom_in_key)
+        self.bind("<Key-equal>", self.zoom_in_key)
+        self.bind("<Key-minus>", self.zoom_out_key)
+        self.bind("<Key-0>", self.reset_zoom_key)
 
         self.drag_start_grid: Optional[Tuple[int, int]] = None
         self.drag_component_original: Optional[Tuple[int, int]] = None
+        self.update_zoom_label()
         self._update_mode_ui()
 
     def _mode_changed(self):
@@ -229,6 +254,11 @@ class PerfboardPlanner(tk.Tk):
     def shift_is_down(event) -> bool:
         # Tk uses bit 0x0001 for Shift on the main desktop platforms.
         return bool(getattr(event, "state", 0) & 0x0001)
+
+    @staticmethod
+    def control_is_down(event) -> bool:
+        # Tk uses bit 0x0004 for Control on the main desktop platforms.
+        return bool(getattr(event, "state", 0) & 0x0004)
 
     def event_from_text_input(self, event) -> bool:
         focus = self.focus_get()
@@ -258,6 +288,10 @@ class PerfboardPlanner(tk.Tk):
         return self.do_pan(event)
 
     def on_mouse_wheel(self, event):
+        if self.control_is_down(event):
+            self.zoom_at_event(event, 1.12 if event.delta > 0 else 1 / 1.12)
+            return "break"
+
         direction = -1 if event.delta > 0 else 1
         if self.shift_is_down(event):
             self.canvas.xview_scroll(direction * 3, "units")
@@ -266,37 +300,117 @@ class PerfboardPlanner(tk.Tk):
         return "break"
 
     def on_linux_wheel_up(self, event):
-        if self.shift_is_down(event):
+        if self.control_is_down(event):
+            self.zoom_at_event(event, 1.12)
+        elif self.shift_is_down(event):
             self.canvas.xview_scroll(-3, "units")
         else:
             self.canvas.yview_scroll(-3, "units")
         return "break"
 
     def on_linux_wheel_down(self, event):
-        if self.shift_is_down(event):
+        if self.control_is_down(event):
+            self.zoom_at_event(event, 1 / 1.12)
+        elif self.shift_is_down(event):
             self.canvas.xview_scroll(3, "units")
         else:
             self.canvas.yview_scroll(3, "units")
         return "break"
 
-    def grid_to_xy(self, row: int, col: int) -> Tuple[int, int]:
-        return self.margin + col * self.spacing, self.margin + row * self.spacing
+    def scaled_spacing(self) -> float:
+        return self.spacing * self.zoom
+
+    def scaled_margin(self) -> float:
+        return self.margin * self.zoom
+
+    def scaled_hole_radius(self) -> float:
+        return max(2.0, self.hole_radius * self.zoom)
+
+    def grid_to_xy(self, row: int, col: int) -> Tuple[float, float]:
+        spacing = self.scaled_spacing()
+        margin = self.scaled_margin()
+        return margin + col * spacing, margin + row * spacing
 
     def xy_to_grid(self, x: int, y: int) -> Optional[Tuple[int, int]]:
-        col = round((x - self.margin) / self.spacing)
-        row = round((y - self.margin) / self.spacing)
+        spacing = self.scaled_spacing()
+        margin = self.scaled_margin()
+        col = round((x - margin) / spacing)
+        row = round((y - margin) / spacing)
         if 0 <= row < self.rows and 0 <= col < self.cols:
             hx, hy = self.grid_to_xy(row, col)
-            if abs(x - hx) <= self.spacing * 0.45 and abs(y - hy) <= self.spacing * 0.45:
+            if abs(x - hx) <= spacing * 0.45 and abs(y - hy) <= spacing * 0.45:
                 return row, col
         return None
 
-    def board_bounds(self) -> Tuple[int, int, int, int]:
-        x1 = self.margin - 18
-        y1 = self.margin - 18
-        x2 = self.margin + (self.cols - 1) * self.spacing + 18
-        y2 = self.margin + (self.rows - 1) * self.spacing + 18
+    def board_bounds(self) -> Tuple[float, float, float, float]:
+        spacing = self.scaled_spacing()
+        margin = self.scaled_margin()
+        edge = 18 * self.zoom
+        x1 = margin - edge
+        y1 = margin - edge
+        x2 = margin + (self.cols - 1) * spacing + edge
+        y2 = margin + (self.rows - 1) * spacing + edge
         return x1, y1, x2, y2
+
+    def update_zoom_label(self):
+        if hasattr(self, "zoom_label"):
+            self.zoom_label.set(f"{round(self.zoom * 100)}%")
+
+    def zoom_step(self, factor: float):
+        self.zoom_at_screen_point(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2, factor)
+
+    def zoom_at_event(self, event, factor: float):
+        self.zoom_at_screen_point(event.x, event.y, factor)
+
+    def zoom_at_screen_point(self, screen_x: int, screen_y: int, factor: float):
+        old_zoom = self.zoom
+        new_zoom = max(self.min_zoom, min(self.max_zoom, self.zoom * factor))
+        if abs(new_zoom - old_zoom) < 0.0001:
+            return
+
+        # The drawing coordinates scale linearly from the canvas origin, so this
+        # keeps the point under the mouse/canvas-center stable while zooming.
+        old_canvas_x = self.canvas.canvasx(screen_x)
+        old_canvas_y = self.canvas.canvasy(screen_y)
+        scale_factor = new_zoom / old_zoom
+
+        self.zoom = new_zoom
+        self.update_zoom_label()
+        self.redraw()
+        self.update_idletasks()
+
+        bbox = self.canvas.bbox("all")
+        if not bbox:
+            return
+        x1, y1, x2, y2 = bbox
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        desired_left = old_canvas_x * scale_factor - screen_x
+        desired_top = old_canvas_y * scale_factor - screen_y
+        self.canvas.xview_moveto(max(0.0, min(1.0, (desired_left - x1) / width)))
+        self.canvas.yview_moveto(max(0.0, min(1.0, (desired_top - y1) / height)))
+        self.status.set(f"Zoom {round(self.zoom * 100)}%")
+
+    def zoom_in_key(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        self.zoom_step(1.15)
+        return "break"
+
+    def zoom_out_key(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        self.zoom_step(1 / 1.15)
+        return "break"
+
+    def reset_zoom(self):
+        self.zoom_at_screen_point(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2, 1 / self.zoom)
+
+    def reset_zoom_key(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        self.reset_zoom()
+        return "break"
 
     def redraw(self):
         self._update_mode_ui()
@@ -316,21 +430,24 @@ class PerfboardPlanner(tk.Tk):
         self.canvas.create_rectangle(x1 + 4, y1 + 4, x2 - 4, y2 - 4, outline="#0b5f29", width=2)
 
         # Header strips similar to common prototype boards.
-        strip_h = 12
+        strip_w = 6 * self.zoom
+        strip_gap_top_a = 28 * self.zoom
+        strip_gap_top_b = 16 * self.zoom
         for col in range(0, self.cols, 2):
             x, y_top = self.grid_to_xy(0, col)
             _, y_bottom = self.grid_to_xy(self.rows - 1, col)
-            self.canvas.create_rectangle(x - 6, y_top - 28, x + 6, y_top - 16, fill="#d8d8d8", outline="")
-            self.canvas.create_rectangle(x - 6, y_bottom + 16, x + 6, y_bottom + 28, fill="#d8d8d8", outline="")
+            self.canvas.create_rectangle(x - strip_w, y_top - strip_gap_top_a, x + strip_w, y_top - strip_gap_top_b, fill="#d8d8d8", outline="")
+            self.canvas.create_rectangle(x - strip_w, y_bottom + strip_gap_top_b, x + strip_w, y_bottom + strip_gap_top_a, fill="#d8d8d8", outline="")
 
+        r = self.scaled_hole_radius()
         for row in range(self.rows):
             for col in range(self.cols):
                 x, y = self.grid_to_xy(row, col)
                 self.canvas.create_oval(
-                    x - self.hole_radius,
-                    y - self.hole_radius,
-                    x + self.hole_radius,
-                    y + self.hole_radius,
+                    x - r,
+                    y - r,
+                    x + r,
+                    y + r,
                     fill="#e8e8e8",
                     outline="#7a7a7a",
                     width=1,
@@ -341,10 +458,10 @@ class PerfboardPlanner(tk.Tk):
         for i, comp in enumerate(self.components):
             x1, y1 = self.grid_to_xy(comp.row, comp.col)
             x2, y2 = self.grid_to_xy(comp.row + comp.height - 1, comp.col + comp.width - 1)
-            pad = self.spacing * 0.38
+            pad = self.scaled_spacing() * 0.38
             selected = self.selected_kind == "component" and self.selected_index == i
             outline = "#ffffff" if selected else "#111111"
-            width = 3 if selected else 1
+            width = max(1, round(3 * self.zoom)) if selected else max(1, round(1 * self.zoom))
             self.canvas.create_rectangle(
                 x1 - pad,
                 y1 - pad,
@@ -360,7 +477,7 @@ class PerfboardPlanner(tk.Tk):
                 (y1 + y2) / 2,
                 text=comp.name,
                 fill="#111111",
-                font=("TkDefaultFont", 10, "bold"),
+                font=("TkDefaultFont", max(6, round(10 * self.zoom)), "bold"),
                 tags=("component", f"component:{i}"),
             )
 
@@ -368,14 +485,14 @@ class PerfboardPlanner(tk.Tk):
         for i, wire in enumerate(self.wires):
             points_xy = [self.grid_to_xy(row, col) for row, col in wire.points]
             selected = self.selected_kind == "wire" and self.selected_index == i
-            width = 7 if selected else 5
+            width = max(2, round((7 if selected else 5) * self.zoom))
             outline = "#ffffff" if selected else wire.color
             if len(points_xy) >= 2:
                 flat = [value for xy in points_xy for value in xy]
                 self.canvas.create_line(
                     *flat,
                     fill=outline,
-                    width=width + (2 if selected else 0),
+                    width=width + (max(1, round(2 * self.zoom)) if selected else 0),
                     capstyle=tk.ROUND,
                     joinstyle=tk.ROUND,
                     tags=("wire", f"wire:{i}"),
@@ -390,10 +507,11 @@ class PerfboardPlanner(tk.Tk):
                 )
             for row, col in wire.points:
                 x, y = self.grid_to_xy(row, col)
-                self.canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=wire.color, outline="", tags=("wire", f"wire:{i}"))
+                r = max(3, 5 * self.zoom)
+                self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=wire.color, outline="", tags=("wire", f"wire:{i}"))
             if wire.name and len(points_xy) >= 2:
                 lx, ly = points_xy[len(points_xy) // 2]
-                self.canvas.create_text(lx + 8, ly - 10, text=wire.name, anchor="w", fill="#111111", tags=("wire", f"wire:{i}"))
+                self.canvas.create_text(lx + 8 * self.zoom, ly - 10 * self.zoom, text=wire.name, anchor="w", fill="#111111", font=("TkDefaultFont", max(6, round(9 * self.zoom))), tags=("wire", f"wire:{i}"))
 
     def draw_temp_wire(self):
         if not self.temp_wire_points:
@@ -401,12 +519,14 @@ class PerfboardPlanner(tk.Tk):
         points_xy = [self.grid_to_xy(row, col) for row, col in self.temp_wire_points]
         if len(points_xy) == 1:
             x, y = points_xy[0]
-            self.canvas.create_oval(x - 6, y - 6, x + 6, y + 6, fill=self.current_wire_color.get(), outline="#ffffff", width=2)
+            r = max(3, 6 * self.zoom)
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=self.current_wire_color.get(), outline="#ffffff", width=max(1, round(2 * self.zoom)))
         else:
             flat = [value for xy in points_xy for value in xy]
-            self.canvas.create_line(*flat, fill=self.current_wire_color.get(), width=4, capstyle=tk.ROUND, joinstyle=tk.ROUND, dash=(8, 4))
+            self.canvas.create_line(*flat, fill=self.current_wire_color.get(), width=max(2, round(4 * self.zoom)), capstyle=tk.ROUND, joinstyle=tk.ROUND, dash=(max(2, round(8 * self.zoom)), max(2, round(4 * self.zoom))))
             for x, y in points_xy:
-                self.canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=self.current_wire_color.get(), outline="")
+                r = max(3, 5 * self.zoom)
+                self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=self.current_wire_color.get(), outline="")
 
     def on_click(self, event):
         self.canvas.focus_set()
@@ -520,7 +640,7 @@ class PerfboardPlanner(tk.Tk):
             comp = self.components[i]
             x1, y1 = self.grid_to_xy(comp.row, comp.col)
             x2, y2 = self.grid_to_xy(comp.row + comp.height - 1, comp.col + comp.width - 1)
-            pad = self.spacing * 0.5
+            pad = self.scaled_spacing() * 0.5
             if min(x1, x2) - pad <= x <= max(x1, x2) + pad and min(y1, y2) - pad <= y <= max(y1, y2) + pad:
                 self.selected_kind = "component"
                 self.selected_index = i
@@ -531,7 +651,7 @@ class PerfboardPlanner(tk.Tk):
             wire = self.wires[i]
             pts = [self.grid_to_xy(row, col) for row, col in wire.points]
             for a, b in zip(pts, pts[1:]):
-                if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= 8:
+                if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= max(6, 8 * self.zoom):
                     self.selected_kind = "wire"
                     self.selected_index = i
                     return
@@ -650,6 +770,7 @@ class PerfboardPlanner(tk.Tk):
             self.rows = int(board.get("rows", self.rows))
             self.cols = int(board.get("cols", self.cols))
             self.spacing = int(board.get("spacing", self.spacing))
+            self.update_zoom_label()
             self.components = [Component(**c) for c in data.get("components", [])]
             self.wires = [Wire(w.get("name", ""), [tuple(p) for p in w.get("points", [])], w.get("color", "#d00000")) for w in data.get("wires", [])]
             self.selected_kind = None
