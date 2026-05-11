@@ -108,6 +108,11 @@ class PerfboardPlanner(tk.Tk):
         self.mode = tk.StringVar(value="select")
         self.current_color = tk.StringVar(value="#ffcc66")
         self.current_wire_color = tk.StringVar(value="#d00000")
+        # View-only filter: wire colours can be hidden from the board from the
+        # dynamic colour menu on the right side of the canvas. This does not
+        # delete wires and does not change layout connectivity/checks.
+        self.hidden_wire_colors: Set[str] = set()
+        self._wire_color_menu_signature = None
         self.current_wire_lane = tk.IntVar(value=0)
         self.current_component_rotation = tk.IntVar(value=0)
         # Wire layers used to be Main/Aux. That turned out to be the wrong
@@ -625,6 +630,8 @@ class PerfboardPlanner(tk.Tk):
             "right-drag = pan, except while finishing a wire\n"
             "mouse wheel = vertical scroll\n"
             "Shift+wheel = horizontal scroll\n\n"
+            "Wire colors:\n"
+            "right-side color buttons hide/show wires by color\n\n"
             "Wire mode:\n"
             "click start, click end = add wire\n"
             "Shift+click = add bend point\n"
@@ -739,10 +746,27 @@ class PerfboardPlanner(tk.Tk):
         )
         self.mode_banner.pack(side=tk.TOP, fill=tk.X)
 
-        self.canvas_border = tk.Frame(board_area, bg="#20639b", padx=4, pady=4)
-        self.canvas_border.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        board_content = ttk.Frame(board_area)
+        board_content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.canvas_border = tk.Frame(board_content, bg="#20639b", padx=4, pady=4)
+        self.canvas_border.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas_border.rowconfigure(0, weight=1)
         self.canvas_border.columnconfigure(0, weight=1)
+
+        self.wire_color_panel = ttk.Frame(board_content, padding=(6, 6), width=150)
+        self.wire_color_panel.pack(side=tk.RIGHT, fill=tk.Y)
+        self.wire_color_panel.pack_propagate(False)
+        ttk.Label(self.wire_color_panel, text="Wire colors", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        ttk.Label(
+            self.wire_color_panel,
+            text="Click a color to hide/show wires.",
+            justify=tk.LEFT,
+            wraplength=130,
+        ).pack(anchor="w", pady=(2, 5))
+        ttk.Button(self.wire_color_panel, text="Show all", command=self.show_all_wire_colors).pack(fill=tk.X, pady=(0, 5))
+        self.wire_color_list = ttk.Frame(self.wire_color_panel)
+        self.wire_color_list.pack(fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(
             self.canvas_border,
@@ -1807,6 +1831,109 @@ class PerfboardPlanner(tk.Tk):
         b = round(fb * opacity + bb * (1.0 - opacity))
         return f"#{r:02x}{g:02x}{b:02x}"
 
+    # ------------------------------------------------------------------
+    # Wire colour visibility menu
+    # ------------------------------------------------------------------
+    @staticmethod
+    def normalize_wire_color(color: str) -> str:
+        color = (color or "#000000").strip()
+        if not color:
+            return "#000000"
+        return color.lower()
+
+    @staticmethod
+    def readable_text_color(background: str) -> str:
+        background = (background or "#000000").lstrip("#")
+        try:
+            if len(background) == 3:
+                background = "".join(ch * 2 for ch in background)
+            r = int(background[0:2], 16)
+            g = int(background[2:4], 16)
+            b = int(background[4:6], 16)
+            # YIQ brightness approximation.
+            return "#111111" if (r * 299 + g * 587 + b * 114) / 1000 >= 150 else "#ffffff"
+        except Exception:
+            return "#ffffff"
+
+    def wire_color_is_hidden(self, color: str) -> bool:
+        return self.normalize_wire_color(color) in self.hidden_wire_colors
+
+    def wire_is_visible_by_color(self, wire: Wire) -> bool:
+        return not self.wire_color_is_hidden(getattr(wire, "color", "#000000"))
+
+    def toggle_wire_color_visibility(self, color: str):
+        key = self.normalize_wire_color(color)
+        if key in self.hidden_wire_colors:
+            self.hidden_wire_colors.remove(key)
+            self.status.set(f"Showing {key} wires.")
+        else:
+            self.hidden_wire_colors.add(key)
+            # Hidden wires should not remain selected, because they cannot be
+            # clicked or edited while the colour is hidden.
+            self.selected_items = {
+                item for item in self.selected_items
+                if not (item[0] == "wire" and 0 <= item[1] < len(self.wires) and self.normalize_wire_color(self.wires[item[1]].color) == key)
+            }
+            self.normalize_selection()
+            self.status.set(f"Hiding {key} wires.")
+        self.redraw()
+
+    def show_all_wire_colors(self):
+        if not self.hidden_wire_colors:
+            self.status.set("All wire colors are already visible.")
+            return
+        self.hidden_wire_colors.clear()
+        self.status.set("Showing all wire colors.")
+        self.redraw()
+
+    def used_wire_color_summary(self) -> List[Tuple[str, int, int, int]]:
+        counts: Dict[str, Dict[str, int]] = {}
+        for wire in self.wires:
+            key = self.normalize_wire_color(getattr(wire, "color", "#000000"))
+            side = getattr(wire, "side", "front")
+            if key not in counts:
+                counts[key] = {"front": 0, "back": 0, "total": 0}
+            if side in ("front", "back"):
+                counts[key][side] += 1
+            counts[key]["total"] += 1
+        return sorted((color, data["front"], data["back"], data["total"]) for color, data in counts.items())
+
+    def update_wire_color_menu(self):
+        if not hasattr(self, "wire_color_list"):
+            return
+        summary = self.used_wire_color_summary()
+        signature = tuple((color, front, back, total, color in self.hidden_wire_colors) for color, front, back, total in summary)
+        if signature == getattr(self, "_wire_color_menu_signature", None):
+            return
+        self._wire_color_menu_signature = signature
+
+        for child in self.wire_color_list.winfo_children():
+            child.destroy()
+
+        if not summary:
+            ttk.Label(self.wire_color_list, text="No wires yet.", wraplength=130, justify=tk.LEFT).pack(anchor="w", pady=(4, 0))
+            return
+
+        for color, front, back, total in summary:
+            hidden = color in self.hidden_wire_colors
+            text = f"{'Show' if hidden else 'Hide'} {color}\nF {front}  B {back}"
+            btn = tk.Button(
+                self.wire_color_list,
+                text=text,
+                bg=color,
+                fg=self.readable_text_color(color),
+                activebackground=color,
+                activeforeground=self.readable_text_color(color),
+                relief=tk.SUNKEN if hidden else tk.RAISED,
+                bd=3 if hidden else 2,
+                padx=4,
+                pady=4,
+                command=lambda c=color: self.toggle_wire_color_visibility(c),
+            )
+            btn.pack(fill=tk.X, pady=(0, 5))
+            if hidden:
+                ttk.Label(self.wire_color_list, text="hidden", foreground="#777777").pack(anchor="e", pady=(0, 4))
+
     def update_part_tab_visibility(self):
         if not hasattr(self, "sidebar_notebook") or not hasattr(self, "part_tab"):
             return
@@ -2045,6 +2172,7 @@ class PerfboardPlanner(tk.Tk):
         self.maybe_capture_undo_state()
         self.update_layout_warning_sets()
         self._update_mode_ui()
+        self.update_wire_color_menu()
         self.canvas.delete("all")
         self.recompute_auto_wire_spacing()
         self.draw_board()
@@ -2457,7 +2585,7 @@ class PerfboardPlanner(tk.Tk):
         for side in ("front", "back"):
             memberships: Dict[Tuple[Tuple[int, int], Tuple[int, int]], List[int]] = {}
             for i, wire in enumerate(self.wires):
-                if wire.side != side:
+                if wire.side != side or not self.wire_is_visible_by_color(wire):
                     continue
                 seen_for_wire = set()
                 for entry in self.wire_unit_entries(wire):
@@ -2590,6 +2718,8 @@ class PerfboardPlanner(tk.Tk):
         colors: List[str] = []
         for index in self.wire_indices_at_grid_point(side, row, col):
             color = self.wires[index].color or "#000000"
+            if self.wire_color_is_hidden(color):
+                continue
             if color not in colors:
                 colors.append(color)
         return colors
@@ -2642,7 +2772,7 @@ class PerfboardPlanner(tk.Tk):
     def explicit_wire_junctions(self, side: str) -> Dict[Tuple[int, int], List[int]]:
         holes: Dict[Tuple[int, int], List[int]] = {}
         for i, wire in enumerate(self.wires):
-            if wire.side != side:
+            if wire.side != side or not self.wire_is_visible_by_color(wire):
                 continue
             for point in set((int(row), int(col)) for row, col in wire.points):
                 holes.setdefault(point, []).append(i)
@@ -2674,7 +2804,7 @@ class PerfboardPlanner(tk.Tk):
                 tags=("wire_junction",),
             )
 
-        visible = [(i, self.wires[i]) for i in range(len(self.wires)) if self.wires[i].side == side]
+        visible = [(i, self.wires[i]) for i in range(len(self.wires)) if self.wires[i].side == side and self.wire_is_visible_by_color(self.wires[i])]
         if len(visible) < 2:
             return
 
@@ -2799,6 +2929,8 @@ class PerfboardPlanner(tk.Tk):
     def draw_wires(self, side: Optional[str] = None, ghost: bool = False):
         for i, wire in enumerate(self.wires):
             if side is not None and wire.side != side:
+                continue
+            if not self.wire_is_visible_by_color(wire):
                 continue
             selected = (not ghost) and self.is_item_selected("wire", i)
             width = max(1, round((4 if ghost else (7 if selected else 5)) * self.zoom))
@@ -2934,7 +3066,7 @@ class PerfboardPlanner(tk.Tk):
         side = self.current_side.get() if side is None else side
         for i in range(len(self.wires) - 1, -1, -1):
             wire = self.wires[i]
-            if wire.side != side:
+            if wire.side != side or not self.wire_is_visible_by_color(wire):
                 continue
             for a, b, _connector in self.wire_visual_segments(i, wire):
                 if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= max(6, 8 * self.zoom):
@@ -3446,6 +3578,8 @@ class PerfboardPlanner(tk.Tk):
             self.components.clear()
             self.wires.clear()
             self.vias.clear()
+            self.hidden_wire_colors.clear()
+            self._wire_color_menu_signature = None
             self.clear_selection()
             self.redraw()
 
@@ -3454,6 +3588,8 @@ class PerfboardPlanner(tk.Tk):
             self.components.clear()
             self.wires.clear()
             self.vias.clear()
+            self.hidden_wire_colors.clear()
+            self._wire_color_menu_signature = None
             self.rows = 30
             self.cols = 45
             self.clear_selection()
@@ -3519,6 +3655,8 @@ class PerfboardPlanner(tk.Tk):
                 lane=self.clamp_wire_lane(w.get("lane", 0)),
             ) for w in data.get("wires", [])]
             self.vias = [Via(int(v.get("row", 0)), int(v.get("col", 0)), v.get("name", ""), v.get("color", "#9c27b0")) for v in data.get("vias", [])]
+            self.hidden_wire_colors.clear()
+            self._wire_color_menu_signature = None
             self.clear_selection()
             self._last_state = self.snapshot_state()
             self.undo_stack.clear()
