@@ -474,48 +474,59 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(quickbar, text="Layers", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
         layer_tabs = ttk.Frame(quickbar)
         layer_tabs.pack(fill=tk.X, pady=(2, 0))
-        ttk.Radiobutton(
-            layer_tabs,
-            text="Front",
-            variable=self.current_side,
-            value="front",
-            command=self._side_changed,
-            style="Toolbutton",
-            width=7,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        ttk.Radiobutton(
-            layer_tabs,
-            text="Back",
-            variable=self.current_side,
-            value="back",
-            command=self._side_changed,
-            style="Toolbutton",
-            width=7,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        ttk.Checkbutton(
-            layer_tabs,
-            text="Parts",
-            variable=self.show_opposite_layer,
-            command=self.toggle_layer_display,
-            style="Toolbutton",
-            width=7,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        ttk.Checkbutton(
-            layer_tabs,
-            text="Pins",
-            variable=self.show_opposite_pins,
-            command=self.toggle_layer_display,
-            style="Toolbutton",
-            width=7,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        ttk.Checkbutton(
-            layer_tabs,
-            text="Wires",
-            variable=self.show_opposite_wires,
-            command=self.toggle_layer_display,
-            style="Toolbutton",
-            width=7,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Five controls share the row evenly. This keeps the ghost-wire control
+        # at 1/5 of the available width instead of forcing the row wider than
+        # the sidebar on small windows.
+        for column in range(5):
+            layer_tabs.columnconfigure(column, weight=1, uniform="layer_tabs")
+
+        layer_buttons = [
+            ttk.Radiobutton(
+                layer_tabs,
+                text="Front",
+                variable=self.current_side,
+                value="front",
+                command=self._side_changed,
+                style="Toolbutton",
+                width=5,
+            ),
+            ttk.Radiobutton(
+                layer_tabs,
+                text="Back",
+                variable=self.current_side,
+                value="back",
+                command=self._side_changed,
+                style="Toolbutton",
+                width=5,
+            ),
+            ttk.Checkbutton(
+                layer_tabs,
+                text="Parts",
+                variable=self.show_opposite_layer,
+                command=self.toggle_layer_display,
+                style="Toolbutton",
+                width=5,
+            ),
+            ttk.Checkbutton(
+                layer_tabs,
+                text="Pins",
+                variable=self.show_opposite_pins,
+                command=self.toggle_layer_display,
+                style="Toolbutton",
+                width=5,
+            ),
+            ttk.Checkbutton(
+                layer_tabs,
+                text="Wire",
+                variable=self.show_opposite_wires,
+                command=self.toggle_layer_display,
+                style="Toolbutton",
+                width=5,
+            ),
+        ]
+        for column, button in enumerate(layer_buttons):
+            button.grid(row=0, column=column, sticky="ew", padx=(0, 2 if column < len(layer_buttons) - 1 else 0))
 
         self.status = tk.StringVar(value="Ready")
         ttk.Label(side_outer, textvariable=self.status, wraplength=315, padding=8).grid(row=1, column=0, sticky="ew")
