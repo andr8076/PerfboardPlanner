@@ -174,114 +174,201 @@ class PerfboardPlanner(tk.Tk):
         root = ttk.Frame(self)
         root.pack(fill=tk.BOTH, expand=True)
 
-        side = ttk.Frame(root, padding=10)
-        side.pack(side=tk.LEFT, fill=tk.Y)
+        # The left panel got crowded as the app grew, so it now uses a
+        # scrollable container plus tabs. The most common controls stay near
+        # the top, while less common settings are grouped away.
+        side_outer = ttk.Frame(root, width=270)
+        side_outer.pack(side=tk.LEFT, fill=tk.Y)
+        side_outer.pack_propagate(False)
 
-        ttk.Label(side, text="Tool", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        side_scroll_area = ttk.Frame(side_outer)
+        side_scroll_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        side_scroll_area.rowconfigure(0, weight=1)
+        side_scroll_area.columnconfigure(0, weight=1)
+
+        side_canvas = tk.Canvas(side_scroll_area, borderwidth=0, highlightthickness=0, width=250)
+        side_canvas.grid(row=0, column=0, sticky="nsew")
+        side_bar = ttk.Scrollbar(side_scroll_area, orient=tk.VERTICAL, command=side_canvas.yview)
+        side_bar.grid(row=0, column=1, sticky="ns")
+        side_canvas.configure(yscrollcommand=side_bar.set)
+
+        side = ttk.Frame(side_canvas, padding=8)
+        side_window = side_canvas.create_window((0, 0), window=side, anchor="nw")
+
+        def update_sidebar_scrollregion(event=None):
+            side_canvas.configure(scrollregion=side_canvas.bbox("all"))
+            side_canvas.itemconfigure(side_window, width=side_canvas.winfo_width())
+
+        side.bind("<Configure>", update_sidebar_scrollregion)
+        side_canvas.bind("<Configure>", update_sidebar_scrollregion)
+
+        def sidebar_wheel(event):
+            if getattr(event, "num", None) == 4:
+                side_canvas.yview_scroll(-3, "units")
+            elif getattr(event, "num", None) == 5:
+                side_canvas.yview_scroll(3, "units")
+            else:
+                delta = -1 if event.delta > 0 else 1
+                side_canvas.yview_scroll(delta * 3, "units")
+            return "break"
+
+        def bind_sidebar_wheel(event=None):
+            side_canvas.bind_all("<MouseWheel>", sidebar_wheel)
+            side_canvas.bind_all("<Button-4>", sidebar_wheel)
+            side_canvas.bind_all("<Button-5>", sidebar_wheel)
+
+        def unbind_sidebar_wheel(event=None):
+            side_canvas.unbind_all("<MouseWheel>")
+            side_canvas.unbind_all("<Button-4>")
+            side_canvas.unbind_all("<Button-5>")
+
+        side_canvas.bind("<Enter>", bind_sidebar_wheel)
+        side_canvas.bind("<Leave>", unbind_sidebar_wheel)
+        side.bind("<Enter>", bind_sidebar_wheel)
+        side.bind("<Leave>", unbind_sidebar_wheel)
+
+        title_row = ttk.Frame(side)
+        title_row.pack(fill=tk.X)
+        ttk.Label(title_row, text="Perfboard Planner", font=("TkDefaultFont", 12, "bold")).pack(side=tk.LEFT, anchor="w")
+
+        self.sidebar_notebook = ttk.Notebook(side)
+        self.sidebar_notebook.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        tool_tab = ttk.Frame(self.sidebar_notebook, padding=8)
+        part_tab = ttk.Frame(self.sidebar_notebook, padding=8)
+        edit_tab = ttk.Frame(self.sidebar_notebook, padding=8)
+        view_tab = ttk.Frame(self.sidebar_notebook, padding=8)
+        file_tab = ttk.Frame(self.sidebar_notebook, padding=8)
+        self.sidebar_notebook.add(tool_tab, text="Tool")
+        self.sidebar_notebook.add(part_tab, text="Part")
+        self.sidebar_notebook.add(edit_tab, text="Edit")
+        self.sidebar_notebook.add(view_tab, text="View")
+        self.sidebar_notebook.add(file_tab, text="File")
+
+        # --- Tool tab -----------------------------------------------------
+        ttk.Label(tool_tab, text="Mode", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         for text, value in [("Select / move", "select"), ("Add component", "component"), ("Draw wire", "wire"), ("Text label", "label")]:
-            ttk.Radiobutton(side, text=text, variable=self.mode, value=value, command=self._mode_changed).pack(anchor="w", pady=2)
+            ttk.Radiobutton(tool_tab, text=text, variable=self.mode, value=value, command=self._mode_changed).pack(anchor="w", pady=2)
 
-        ttk.Separator(side).pack(fill=tk.X, pady=10)
+        ttk.Separator(tool_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(tool_tab, text="Selected item", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(tool_tab, text="Delete selected", command=self.delete_selected).pack(fill=tk.X, pady=(4, 2))
+        ttk.Button(tool_tab, text="Send selected to other side", command=self.move_selected_to_other_side).pack(fill=tk.X, pady=2)
 
-        ttk.Label(side, text="Component", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        ttk.Label(side, text="Name").pack(anchor="w")
-        ttk.Entry(side, textvariable=self.current_name, width=18).pack(anchor="w", fill=tk.X)
+        ttk.Separator(tool_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(
+            tool_tab,
+            text=(
+                "Most work happens here.\n\n"
+                "Tip: the colored banner above the board shows the active mode and side."
+            ),
+            justify=tk.LEFT,
+            wraplength=210,
+        ).pack(anchor="w")
 
-        size_row = ttk.Frame(side)
-        size_row.pack(anchor="w", pady=4)
+        # --- Part tab -----------------------------------------------------
+        ttk.Label(part_tab, text="New component", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(part_tab, text="Name").pack(anchor="w", pady=(5, 0))
+        ttk.Entry(part_tab, textvariable=self.current_name, width=18).pack(anchor="w", fill=tk.X)
+
+        size_row = ttk.Frame(part_tab)
+        size_row.pack(anchor="w", pady=6)
         ttk.Label(size_row, text="W").pack(side=tk.LEFT)
         ttk.Spinbox(size_row, from_=1, to=30, textvariable=self.component_w, width=4).pack(side=tk.LEFT, padx=(3, 8))
         ttk.Label(size_row, text="H").pack(side=tk.LEFT)
         ttk.Spinbox(size_row, from_=1, to=30, textvariable=self.component_h, width=4).pack(side=tk.LEFT, padx=3)
 
-        ttk.Button(side, text="Component color", command=self.choose_component_color).pack(fill=tk.X, pady=3)
-        ttk.Button(side, text="Wire color", command=self.choose_wire_color).pack(fill=tk.X, pady=3)
+        ttk.Button(part_tab, text="Component color", command=self.choose_component_color).pack(fill=tk.X, pady=2)
+        ttk.Button(part_tab, text="Wire color", command=self.choose_wire_color).pack(fill=tk.X, pady=2)
 
+        ttk.Separator(part_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(part_tab, text="Attachment pins", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         self.pin_count_label = tk.StringVar(value="Pins: 2")
-        ttk.Label(side, textvariable=self.pin_count_label).pack(anchor="w", pady=(8, 2))
-        ttk.Button(side, text="Edit new-component pins", command=self.edit_new_component_pins).pack(fill=tk.X, pady=2)
-        ttk.Button(side, text="Edit selected pins", command=self.edit_selected_component_pins).pack(fill=tk.X, pady=2)
+        ttk.Label(part_tab, textvariable=self.pin_count_label).pack(anchor="w", pady=(4, 2))
+        ttk.Button(part_tab, text="Edit new-component pins", command=self.edit_new_component_pins).pack(fill=tk.X, pady=2)
+        ttk.Button(part_tab, text="Edit selected pins", command=self.edit_selected_component_pins).pack(fill=tk.X, pady=2)
 
-        ttk.Separator(side).pack(fill=tk.X, pady=10)
-
-        ttk.Label(side, text="Clipboard", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        clip_row_a = ttk.Frame(side)
-        clip_row_a.pack(anchor="w", fill=tk.X, pady=(2, 0))
+        # --- Edit tab -----------------------------------------------------
+        ttk.Label(edit_tab, text="Clipboard", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        clip_row_a = ttk.Frame(edit_tab)
+        clip_row_a.pack(anchor="w", fill=tk.X, pady=(5, 0))
         ttk.Button(clip_row_a, text="Copy", command=self.copy_selected_component).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(clip_row_a, text="Cut", command=self.cut_selected_component).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
-        clip_row_b = ttk.Frame(side)
-        clip_row_b.pack(anchor="w", fill=tk.X, pady=(3, 0))
+        clip_row_b = ttk.Frame(edit_tab)
+        clip_row_b.pack(anchor="w", fill=tk.X, pady=(4, 0))
         ttk.Button(clip_row_b, text="Paste", command=self.paste_component).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(clip_row_b, text="Duplicate", command=self.duplicate_selected_component).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
-        ttk.Separator(side).pack(fill=tk.X, pady=10)
+        ttk.Separator(edit_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(
+            edit_tab,
+            text=(
+                "Keyboard shortcuts:\n"
+                "Ctrl/Cmd+C = copy\n"
+                "Ctrl/Cmd+X = cut\n"
+                "Ctrl/Cmd+V = paste\n"
+                "Ctrl/Cmd+D = duplicate\n"
+                "Delete/Backspace = delete"
+            ),
+            justify=tk.LEFT,
+            wraplength=210,
+        ).pack(anchor="w")
 
-        ttk.Label(side, text="Board", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        board_row = ttk.Frame(side)
-        board_row.pack(anchor="w", pady=4)
-        ttk.Button(board_row, text="Resize", command=self.resize_board).pack(side=tk.LEFT)
-        ttk.Button(board_row, text="Clear", command=self.clear_board).pack(side=tk.LEFT, padx=5)
+        # --- View tab -----------------------------------------------------
+        ttk.Label(view_tab, text="Board side", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        side_row = ttk.Frame(view_tab)
+        side_row.pack(anchor="w", fill=tk.X, pady=(5, 2))
+        ttk.Radiobutton(side_row, text="Front", variable=self.current_side, value="front", command=self._side_changed).pack(side=tk.LEFT)
+        ttk.Radiobutton(side_row, text="Back", variable=self.current_side, value="back", command=self._side_changed).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(view_tab, text="See-through other side", variable=self.show_opposite_layer, command=self.redraw).pack(anchor="w", pady=(5, 0))
+        ttk.Checkbutton(view_tab, text="Other-side pins/wires", variable=self.show_opposite_connections, command=self.redraw).pack(anchor="w")
 
-        zoom_row = ttk.Frame(side)
-        zoom_row.pack(anchor="w", pady=(2, 4), fill=tk.X)
+        ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(view_tab, text="Zoom", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        zoom_row = ttk.Frame(view_tab)
+        zoom_row.pack(anchor="w", pady=(5, 4), fill=tk.X)
         ttk.Button(zoom_row, text="−", width=3, command=lambda: self.zoom_step(1 / 1.15)).pack(side=tk.LEFT)
         self.zoom_label = tk.StringVar(value="100%")
         ttk.Label(zoom_row, textvariable=self.zoom_label, width=7, anchor="center").pack(side=tk.LEFT, padx=4)
         ttk.Button(zoom_row, text="+", width=3, command=lambda: self.zoom_step(1.15)).pack(side=tk.LEFT)
         ttk.Button(zoom_row, text="Reset", command=self.reset_zoom).pack(side=tk.LEFT, padx=(5, 0))
 
-        ttk.Separator(side).pack(fill=tk.X, pady=10)
+        ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(view_tab, text="Board", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        board_row = ttk.Frame(view_tab)
+        board_row.pack(anchor="w", pady=5, fill=tk.X)
+        ttk.Button(board_row, text="Resize", command=self.resize_board).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(board_row, text="Clear", command=self.clear_board).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
-        ttk.Label(side, text="Side / layers", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        side_row = ttk.Frame(side)
-        side_row.pack(anchor="w", fill=tk.X, pady=(2, 2))
-        ttk.Radiobutton(side_row, text="Front", variable=self.current_side, value="front", command=self._side_changed).pack(side=tk.LEFT)
-        ttk.Radiobutton(side_row, text="Back", variable=self.current_side, value="back", command=self._side_changed).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Checkbutton(side, text="See-through other side", variable=self.show_opposite_layer, command=self.redraw).pack(anchor="w", pady=(3, 0))
-        ttk.Checkbutton(side, text="Other-side pins/wires", variable=self.show_opposite_connections, command=self.redraw).pack(anchor="w")
-        ttk.Button(side, text="Send selected to other side", command=self.move_selected_to_other_side).pack(fill=tk.X, pady=(4, 0))
+        # --- File tab -----------------------------------------------------
+        ttk.Label(file_tab, text="File", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(file_tab, text="New", command=self.new_file).pack(fill=tk.X, pady=(5, 2))
+        ttk.Button(file_tab, text="Open JSON", command=self.open_file).pack(fill=tk.X, pady=2)
+        ttk.Button(file_tab, text="Save JSON", command=self.save_file).pack(fill=tk.X, pady=2)
+        ttk.Button(file_tab, text="Export PNG", command=self.export_png).pack(fill=tk.X, pady=2)
 
-        ttk.Separator(side).pack(fill=tk.X, pady=10)
-
-        ttk.Label(side, text="File", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        ttk.Button(side, text="New", command=self.new_file).pack(fill=tk.X, pady=2)
-        ttk.Button(side, text="Open JSON", command=self.open_file).pack(fill=tk.X, pady=2)
-        ttk.Button(side, text="Save JSON", command=self.save_file).pack(fill=tk.X, pady=2)
-        ttk.Button(side, text="Export PNG", command=self.export_png).pack(fill=tk.X, pady=2)
-
-        ttk.Separator(side).pack(fill=tk.X, pady=10)
-
+        ttk.Separator(file_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(file_tab, text="Controls", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         help_text = (
-            "Use the holes as snap points.\n\n"
             "View:\n"
-            "  Front/Back = active board side\n"
-            "  See-through = ghost the other side\n"
-            "  Other-side pins/wires = show opposite connections\n"
-            "  Ctrl + wheel = zoom\n"
-            "  + / - = zoom in/out\n"
-            "  0 = reset zoom\n"
-            "  middle-drag = pan\n"
-            "  right-drag = pan, except while finishing a wire\n"
-            "  mouse wheel = vertical scroll\n"
-            "  Shift + wheel = horizontal scroll\n\n"
+            "Ctrl+wheel = zoom\n"
+            "+ / - = zoom in/out\n"
+            "0 = reset zoom\n"
+            "middle-drag = pan\n"
+            "right-drag = pan, except while finishing a wire\n"
+            "mouse wheel = vertical scroll\n"
+            "Shift+wheel = horizontal scroll\n\n"
             "Wire mode:\n"
-            "  click start, click end = add wire\n"
-            "  Shift+click = add bend point\n"
-            "  right-click / Enter = finish wire\n"
-            "  Esc = cancel wire\n\n"
-            "Select mode:\n"
-            "  click item to select\n"
-            "  drag component to move\n"
-            "  Ctrl/Cmd+C = copy component\n"
-            "  Ctrl/Cmd+X = cut component\n"
-            "  Ctrl/Cmd+V = paste component\n"
-            "  Ctrl/Cmd+D = duplicate component\n"
-            "  Delete / Backspace = remove selected"
+            "click start, click end = add wire\n"
+            "Shift+click = add bend point\n"
+            "right-click / Enter = finish wire\n"
+            "Esc = cancel wire"
         )
-        ttk.Label(side, text=help_text, justify=tk.LEFT).pack(anchor="w", pady=5)
+        ttk.Label(file_tab, text=help_text, justify=tk.LEFT, wraplength=215).pack(anchor="w", pady=4)
 
         self.status = tk.StringVar(value="Ready")
-        ttk.Label(side, textvariable=self.status, wraplength=190).pack(anchor="w", side=tk.BOTTOM)
+        ttk.Separator(side_outer).pack(fill=tk.X)
+        ttk.Label(side_outer, textvariable=self.status, wraplength=245, padding=8).pack(side=tk.BOTTOM, fill=tk.X)
 
         board_area = ttk.Frame(root)
         board_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
