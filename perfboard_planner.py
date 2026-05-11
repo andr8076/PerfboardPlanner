@@ -13,6 +13,13 @@ class ComponentPin:
 
 
 @dataclass
+class ComponentJumper:
+    pin_a: str
+    pin_b: str
+    color: str = "#00aaff"
+
+
+@dataclass
 class Component:
     name: str
     row: int
@@ -22,6 +29,7 @@ class Component:
     color: str
     side: str = "front"
     pins: List[ComponentPin] = field(default_factory=list)
+    jumpers: List[ComponentJumper] = field(default_factory=list)
 
 
 @dataclass
@@ -30,6 +38,7 @@ class Wire:
     points: List[Tuple[int, int]]  # [(row, col), ...]
     color: str
     side: str = "front"
+    layer: str = "main"
 
 
 class PerfboardPlanner(tk.Tk):
@@ -62,10 +71,19 @@ class PerfboardPlanner(tk.Tk):
         self.mode = tk.StringVar(value="select")
         self.current_color = tk.StringVar(value="#ffcc66")
         self.current_wire_color = tk.StringVar(value="#d00000")
+        self.wire_layers = [("main", "Main"), ("aux", "Aux")]
+        self.current_wire_layer = tk.StringVar(value="main")
+        self.show_wire_layer_main = tk.BooleanVar(value=True)
+        self.show_wire_layer_aux = tk.BooleanVar(value=True)
+        self.wire_layer_visibility = {
+            "main": self.show_wire_layer_main,
+            "aux": self.show_wire_layer_aux,
+        }
         self.current_name = tk.StringVar(value="Part")
         self.component_w = tk.IntVar(value=4)
         self.component_h = tk.IntVar(value=2)
         self.component_pin_template: List[ComponentPin] = self.default_pins_for_size(4, 2)
+        self.component_jumper_template: List[ComponentJumper] = []
         self.component_clipboard: Optional[Component] = None
         self.component_paste_count = 0
         self.component_w.trace_add("write", lambda *_: self.update_pin_count_label())
@@ -80,7 +98,7 @@ class PerfboardPlanner(tk.Tk):
             "select": {
                 "label": "SELECT / MOVE",
                 "color": "#20639b",
-                "hint": "Click an item to select it. Drag components to move them. Delete/Backspace removes the selected item.",
+                "hint": "Click an item to select it. Drag components to move them. Double-click a component to edit it. Delete/Backspace removes the selected item.",
             },
             "component": {
                 "label": "ADD COMPONENT",
@@ -114,6 +132,10 @@ class PerfboardPlanner(tk.Tk):
     def copy_pins(pins: List[ComponentPin]) -> List[ComponentPin]:
         return [ComponentPin(pin.name, int(pin.row), int(pin.col)) for pin in pins]
 
+    @staticmethod
+    def copy_jumpers(jumpers: List[ComponentJumper]) -> List[ComponentJumper]:
+        return [ComponentJumper(j.pin_a, j.pin_b, getattr(j, "color", "#00aaff") or "#00aaff") for j in jumpers]
+
     @classmethod
     def clone_component(
         cls,
@@ -132,22 +154,44 @@ class PerfboardPlanner(tk.Tk):
             color=comp.color,
             side=comp.side if side is None else side,
             pins=cls.copy_pins(comp.pins),
+            jumpers=cls.copy_jumpers(comp.jumpers),
         )
 
     @staticmethod
     def normalized_pins(pins: List[ComponentPin], width: int, height: int) -> List[ComponentPin]:
         normalized: List[ComponentPin] = []
         used: set[Tuple[int, int]] = set()
+        outside_limit = 20
         for pin in pins:
             row = int(pin.row)
             col = int(pin.col)
-            if not (0 <= row < height and 0 <= col < width):
+            # Pins are allowed to sit outside the component body. That covers
+            # parts with legs/leads coming out of the package, headers offset
+            # from the visible body, and odd custom footprints.
+            if not (-outside_limit <= row < height + outside_limit and -outside_limit <= col < width + outside_limit):
                 continue
             if (row, col) in used:
                 continue
             name = str(pin.name or f"P{len(normalized) + 1}").strip() or f"P{len(normalized) + 1}"
             normalized.append(ComponentPin(name, row, col))
             used.add((row, col))
+        return normalized
+
+    @staticmethod
+    def normalized_jumpers(jumpers: List[ComponentJumper], pins: List[ComponentPin]) -> List[ComponentJumper]:
+        names = {pin.name for pin in pins}
+        normalized: List[ComponentJumper] = []
+        used: set[Tuple[str, str]] = set()
+        for jumper in jumpers:
+            a = str(jumper.pin_a or "").strip()
+            b = str(jumper.pin_b or "").strip()
+            if not a or not b or a == b or a not in names or b not in names:
+                continue
+            key = tuple(sorted((a, b)))
+            if key in used:
+                continue
+            normalized.append(ComponentJumper(a, b, getattr(jumper, "color", "#00aaff") or "#00aaff"))
+            used.add(key)
         return normalized
 
     def update_pin_count_label(self):
@@ -245,11 +289,13 @@ class PerfboardPlanner(tk.Tk):
 
         tool_tab = ttk.Frame(self.sidebar_notebook, padding=8)
         part_tab = ttk.Frame(self.sidebar_notebook, padding=8)
+        wire_tab = ttk.Frame(self.sidebar_notebook, padding=8)
         edit_tab = ttk.Frame(self.sidebar_notebook, padding=8)
         view_tab = ttk.Frame(self.sidebar_notebook, padding=8)
         file_tab = ttk.Frame(self.sidebar_notebook, padding=8)
         self.tool_tab = tool_tab
         self.part_tab = part_tab
+        self.wire_tab = wire_tab
         self.edit_tab = edit_tab
         self.view_tab = view_tab
         self.file_tab = file_tab
@@ -261,7 +307,9 @@ class PerfboardPlanner(tk.Tk):
 
         # --- Tool tab -----------------------------------------------------
         ttk.Label(tool_tab, text="Selected item", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        ttk.Button(tool_tab, text="Delete selected", command=self.delete_selected).pack(fill=tk.X, pady=(4, 2))
+        ttk.Button(tool_tab, text="Edit selected component", command=self.edit_selected_component).pack(fill=tk.X, pady=(4, 2))
+        ttk.Button(tool_tab, text="Edit selected wire", command=self.edit_selected_wire).pack(fill=tk.X, pady=2)
+        ttk.Button(tool_tab, text="Delete selected", command=self.delete_selected).pack(fill=tk.X, pady=2)
         ttk.Button(tool_tab, text="Send selected to other side", command=self.move_selected_to_other_side).pack(fill=tk.X, pady=2)
 
         ttk.Separator(tool_tab).pack(fill=tk.X, pady=10)
@@ -288,7 +336,6 @@ class PerfboardPlanner(tk.Tk):
         ttk.Spinbox(size_row, from_=1, to=30, textvariable=self.component_h, width=4).pack(side=tk.LEFT, padx=3)
 
         ttk.Button(part_tab, text="Component color", command=self.choose_component_color).pack(fill=tk.X, pady=2)
-        ttk.Button(part_tab, text="Wire color", command=self.choose_wire_color).pack(fill=tk.X, pady=2)
 
         ttk.Separator(part_tab).pack(fill=tk.X, pady=10)
         ttk.Label(part_tab, text="Attachment pins", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
@@ -296,6 +343,34 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(part_tab, textvariable=self.pin_count_label).pack(anchor="w", pady=(4, 2))
         ttk.Button(part_tab, text="Edit new-component pins", command=self.edit_new_component_pins).pack(fill=tk.X, pady=2)
         ttk.Button(part_tab, text="Edit selected pins", command=self.edit_selected_component_pins).pack(fill=tk.X, pady=2)
+
+        # --- Wire tab -----------------------------------------------------
+        ttk.Label(wire_tab, text="New wires", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(wire_tab, text="Wire color", command=self.choose_wire_color).pack(fill=tk.X, pady=(5, 2))
+
+        ttk.Label(wire_tab, text="Wire layer").pack(anchor="w", pady=(8, 2))
+        wire_layer_row = ttk.Frame(wire_tab)
+        wire_layer_row.pack(fill=tk.X)
+        for layer_value, layer_text in self.wire_layers:
+            ttk.Radiobutton(
+                wire_layer_row,
+                text=layer_text,
+                variable=self.current_wire_layer,
+                value=layer_value,
+                style="Toolbutton",
+                width=8,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+
+        ttk.Separator(wire_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(wire_tab, text="Selected wire", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(wire_tab, text="Edit selected wire…", command=self.edit_selected_wire).pack(fill=tk.X, pady=(5, 2))
+        ttk.Button(wire_tab, text="Apply current color", command=self.apply_current_wire_color_to_selected).pack(fill=tk.X, pady=2)
+        ttk.Label(
+            wire_tab,
+            text="Tip: double-click a wire in Select mode to edit its name, color, side, and layer.",
+            justify=tk.LEFT,
+            wraplength=270,
+        ).pack(anchor="w", pady=(8, 0))
 
         # --- Edit tab -----------------------------------------------------
         ttk.Label(edit_tab, text="Clipboard", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
@@ -340,6 +415,33 @@ class PerfboardPlanner(tk.Tk):
         ttk.Button(board_row, text="Resize", command=self.resize_board).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(board_row, text="Clear", command=self.clear_board).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
+        ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(view_tab, text="Wire layers", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        wire_visible_row = ttk.Frame(view_tab)
+        wire_visible_row.pack(anchor="w", fill=tk.X, pady=(5, 0))
+        ttk.Checkbutton(
+            wire_visible_row,
+            text="Main",
+            variable=self.show_wire_layer_main,
+            command=self.redraw,
+            style="Toolbutton",
+            width=8,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Checkbutton(
+            wire_visible_row,
+            text="Aux",
+            variable=self.show_wire_layer_aux,
+            command=self.redraw,
+            style="Toolbutton",
+            width=8,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(
+            view_tab,
+            text="Each wire belongs to one wire layer. Hidden wire layers are not drawn or selectable.",
+            justify=tk.LEFT,
+            wraplength=270,
+        ).pack(anchor="w", pady=(6, 0))
+
         # --- File tab -----------------------------------------------------
         ttk.Label(file_tab, text="File", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         ttk.Button(file_tab, text="New", command=self.new_file).pack(fill=tk.X, pady=(5, 2))
@@ -355,6 +457,8 @@ class PerfboardPlanner(tk.Tk):
             "+ / - = zoom in/out\n"
             "0 = reset zoom\n"
             "middle-drag = pan\n"
+            "double-click component = edit component\n"
+            "double-click wire = edit wire\n"
             "right-drag = pan, except while finishing a wire\n"
             "mouse wheel = vertical scroll\n"
             "Shift+wheel = horizontal scroll\n\n"
@@ -461,6 +565,7 @@ class PerfboardPlanner(tk.Tk):
         self.canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
 
         self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<Double-Button-1>", self.on_double_click)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Motion>", self.on_motion)
@@ -531,6 +636,269 @@ class PerfboardPlanner(tk.Tk):
         self.update_pin_count_label()
         self._update_mode_ui()
 
+    def edit_selected_component(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        if self.selected_kind != "component" or self.selected_index is None:
+            self.status.set("Select a component first, then double-click it or use Edit selected component.")
+            return "break"
+        self.open_component_editor(self.selected_index)
+        return "break"
+
+    def edit_selected_wire(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        if self.selected_kind != "wire" or self.selected_index is None:
+            self.status.set("Select a wire first, then double-click it or use Edit selected wire.")
+            return "break"
+        self.open_wire_editor(self.selected_index)
+        return "break"
+
+    def open_wire_editor(self, wire_index: int):
+        if not (0 <= wire_index < len(self.wires)):
+            self.status.set("The selected wire no longer exists.")
+            return
+
+        wire = self.wires[wire_index]
+        win = tk.Toplevel(self)
+        win.title("Edit wire")
+        win.transient(self)
+        win.resizable(False, False)
+
+        name_var = tk.StringVar(value=wire.name)
+        color_var = tk.StringVar(value=wire.color)
+        side_var = tk.StringVar(value=wire.side)
+        layer_var = tk.StringVar(value=getattr(wire, "layer", "main") or "main")
+
+        body = ttk.Frame(win, padding=10)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(body, text="Wire", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(body, text="Name").grid(row=1, column=0, sticky="w", pady=(8, 2))
+        ttk.Entry(body, textvariable=name_var, width=24).grid(row=1, column=1, columnspan=2, sticky="ew", pady=(8, 2))
+
+        ttk.Label(body, text="Side").grid(row=2, column=0, sticky="w", pady=2)
+        side_frame = ttk.Frame(body)
+        side_frame.grid(row=2, column=1, columnspan=2, sticky="w", pady=2)
+        ttk.Radiobutton(side_frame, text="Front", variable=side_var, value="front").pack(side=tk.LEFT)
+        ttk.Radiobutton(side_frame, text="Back", variable=side_var, value="back").pack(side=tk.LEFT, padx=(12, 0))
+
+        ttk.Label(body, text="Layer").grid(row=3, column=0, sticky="w", pady=2)
+        layer_frame = ttk.Frame(body)
+        layer_frame.grid(row=3, column=1, columnspan=2, sticky="w", pady=2)
+        for layer_value, layer_text in self.wire_layers:
+            ttk.Radiobutton(layer_frame, text=layer_text, variable=layer_var, value=layer_value).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Label(body, text="Color").grid(row=4, column=0, sticky="w", pady=2)
+        color_preview = tk.Label(body, textvariable=color_var, bg=color_var.get(), fg="#111111", width=12, relief=tk.SUNKEN)
+        color_preview.grid(row=4, column=1, sticky="w", pady=2)
+
+        def choose_color():
+            color = colorchooser.askcolor(color=color_var.get(), title="Choose wire color", parent=win)
+            if color and color[1]:
+                color_var.set(color[1])
+                color_preview.configure(bg=color[1])
+
+        ttk.Button(body, text="Choose…", command=choose_color).grid(row=4, column=2, sticky="ew", padx=(6, 0), pady=2)
+
+        points_text = " → ".join(f"R{row + 1}C{col + 1}" for row, col in wire.points)
+        ttk.Label(body, text="Points").grid(row=5, column=0, sticky="nw", pady=(8, 2))
+        ttk.Label(body, text=points_text or "No points", wraplength=280, justify=tk.LEFT).grid(row=5, column=1, columnspan=2, sticky="w", pady=(8, 2))
+
+        def apply_changes():
+            if not (0 <= wire_index < len(self.wires)):
+                win.destroy()
+                self.status.set("The selected wire no longer exists.")
+                return
+            edited = self.wires[wire_index]
+            edited.name = name_var.get().strip()
+            edited.color = color_var.get() or "#d00000"
+            edited.side = side_var.get() if side_var.get() in {"front", "back"} else self.current_side.get()
+            edited.layer = layer_var.get() if layer_var.get() in dict(self.wire_layers) else "main"
+            self.selected_kind = "wire"
+            self.selected_index = wire_index
+            self.current_side.set(edited.side)
+            self.current_wire_layer.set(edited.layer)
+            self.status.set("Updated wire.")
+            win.destroy()
+            self.redraw()
+
+        bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
+        bottom.pack(fill=tk.X)
+        ttk.Button(bottom, text="Apply", command=apply_changes).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(bottom, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+
+        win.bind("<Return>", lambda event: apply_changes())
+        win.bind("<Escape>", lambda event: win.destroy())
+        win.grab_set()
+        win.wait_window()
+
+    def apply_current_wire_color_to_selected(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        if self.selected_kind != "wire" or self.selected_index is None or not (0 <= self.selected_index < len(self.wires)):
+            self.status.set("Select a wire first, then apply the current wire color.")
+            return "break"
+        wire = self.wires[self.selected_index]
+        wire.color = self.current_wire_color.get()
+        wire.layer = self.current_wire_layer.get()
+        self.status.set("Applied current wire color/layer to selected wire.")
+        self.redraw()
+        return "break"
+
+    def open_component_editor(self, component_index: int):
+        if not (0 <= component_index < len(self.components)):
+            self.status.set("The selected component no longer exists.")
+            return
+
+        comp = self.components[component_index]
+        win = tk.Toplevel(self)
+        win.title(f"Edit component: {comp.name}")
+        win.transient(self)
+        win.resizable(False, False)
+
+        name_var = tk.StringVar(value=comp.name)
+        row_var = tk.IntVar(value=comp.row + 1)
+        col_var = tk.IntVar(value=comp.col + 1)
+        width_var = tk.IntVar(value=comp.width)
+        height_var = tk.IntVar(value=comp.height)
+        color_var = tk.StringVar(value=comp.color)
+        side_var = tk.StringVar(value=comp.side)
+        edit_pins: List[ComponentPin] = self.copy_pins(comp.pins)
+        edit_jumpers: List[ComponentJumper] = self.copy_jumpers(comp.jumpers)
+        pin_summary = tk.StringVar(value="")
+
+        body = ttk.Frame(win, padding=10)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(body, text="Component", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+
+        ttk.Label(body, text="Name").grid(row=1, column=0, sticky="w", pady=(8, 2))
+        ttk.Entry(body, textvariable=name_var, width=24).grid(row=1, column=1, columnspan=2, sticky="ew", pady=(8, 2))
+
+        ttk.Label(body, text="Position").grid(row=2, column=0, sticky="w", pady=2)
+        pos_frame = ttk.Frame(body)
+        pos_frame.grid(row=2, column=1, columnspan=2, sticky="w", pady=2)
+        ttk.Label(pos_frame, text="Row").pack(side=tk.LEFT)
+        ttk.Spinbox(pos_frame, from_=1, to=max(1, self.rows), textvariable=row_var, width=5).pack(side=tk.LEFT, padx=(3, 10))
+        ttk.Label(pos_frame, text="Col").pack(side=tk.LEFT)
+        ttk.Spinbox(pos_frame, from_=1, to=max(1, self.cols), textvariable=col_var, width=5).pack(side=tk.LEFT, padx=(3, 0))
+
+        ttk.Label(body, text="Size").grid(row=3, column=0, sticky="w", pady=2)
+        size_frame = ttk.Frame(body)
+        size_frame.grid(row=3, column=1, columnspan=2, sticky="w", pady=2)
+        ttk.Label(size_frame, text="W").pack(side=tk.LEFT)
+        ttk.Spinbox(size_frame, from_=1, to=max(1, self.cols), textvariable=width_var, width=5).pack(side=tk.LEFT, padx=(3, 10))
+        ttk.Label(size_frame, text="H").pack(side=tk.LEFT)
+        ttk.Spinbox(size_frame, from_=1, to=max(1, self.rows), textvariable=height_var, width=5).pack(side=tk.LEFT, padx=(3, 0))
+
+        ttk.Label(body, text="Side").grid(row=4, column=0, sticky="w", pady=2)
+        side_frame = ttk.Frame(body)
+        side_frame.grid(row=4, column=1, columnspan=2, sticky="w", pady=2)
+        ttk.Radiobutton(side_frame, text="Front", variable=side_var, value="front").pack(side=tk.LEFT)
+        ttk.Radiobutton(side_frame, text="Back", variable=side_var, value="back").pack(side=tk.LEFT, padx=(12, 0))
+
+        ttk.Label(body, text="Color").grid(row=5, column=0, sticky="w", pady=2)
+        color_preview = tk.Label(body, textvariable=color_var, bg=color_var.get(), fg="#111111", width=12, relief=tk.SUNKEN)
+        color_preview.grid(row=5, column=1, sticky="w", pady=2)
+
+        def choose_color():
+            color = colorchooser.askcolor(color=color_var.get(), title="Choose component color", parent=win)
+            if color and color[1]:
+                color_var.set(color[1])
+                color_preview.configure(bg=color[1])
+
+        ttk.Button(body, text="Choose…", command=choose_color).grid(row=5, column=2, sticky="ew", padx=(6, 0), pady=2)
+
+        ttk.Separator(body).grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
+        ttk.Label(body, text="Attachment pins", font=("TkDefaultFont", 11, "bold")).grid(row=7, column=0, columnspan=3, sticky="w")
+        ttk.Label(body, textvariable=pin_summary).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
+
+        def read_size() -> Tuple[int, int]:
+            try:
+                width = max(1, int(width_var.get()))
+                height = max(1, int(height_var.get()))
+            except Exception:
+                width, height = max(1, comp.width), max(1, comp.height)
+            return width, height
+
+        def update_pin_summary(*_):
+            width, height = read_size()
+            kept = self.normalized_pins(edit_pins, width, height)
+            kept_jumpers = self.normalized_jumpers(edit_jumpers, kept)
+            removed = len(edit_pins) - len(kept)
+            extra = f" ({removed} far-outside pins will be removed)" if removed else ""
+            pin_summary.set(f"Pins: {len(kept)}, internal jumpers: {len(kept_jumpers)}{extra}")
+
+        def edit_pins_action():
+            nonlocal edit_pins
+            width, height = read_size()
+            pins = self.normalized_pins(edit_pins, width, height)
+
+            def apply_pins(updated_pins: List[ComponentPin], updated_jumpers: Optional[List[ComponentJumper]] = None):
+                nonlocal edit_pins, edit_jumpers
+                edit_pins = self.normalized_pins(updated_pins, width, height)
+                edit_jumpers = self.normalized_jumpers(updated_jumpers or [], edit_pins)
+                update_pin_summary()
+
+            self.open_pin_editor(f"Pin layout: {name_var.get() or comp.name}", width, height, pins, apply_pins, jumpers=edit_jumpers)
+
+        ttk.Button(body, text="Edit pins…", command=edit_pins_action).grid(row=9, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+
+        for variable in (width_var, height_var):
+            variable.trace_add("write", update_pin_summary)
+        update_pin_summary()
+
+        def apply_changes():
+            if not (0 <= component_index < len(self.components)):
+                win.destroy()
+                self.status.set("The selected component no longer exists.")
+                return
+            edited = self.components[component_index]
+            try:
+                width = max(1, int(width_var.get()))
+                height = max(1, int(height_var.get()))
+                row = max(0, int(row_var.get()) - 1)
+                col = max(0, int(col_var.get()) - 1)
+            except Exception:
+                messagebox.showerror("Invalid values", "Row, column, width, and height must be numbers.", parent=win)
+                return
+
+            if width > self.cols or height > self.rows:
+                messagebox.showerror("Component too large", "The component must fit inside the current board size.", parent=win)
+                return
+
+            row = max(0, min(self.rows - height, row))
+            col = max(0, min(self.cols - width, col))
+            side = side_var.get() if side_var.get() in {"front", "back"} else self.current_side.get()
+
+            edited.name = name_var.get().strip() or "Part"
+            edited.row = row
+            edited.col = col
+            edited.width = width
+            edited.height = height
+            edited.color = color_var.get() or "#ffcc66"
+            edited.side = side
+            edited.pins = self.normalized_pins(edit_pins, width, height)
+            edited.jumpers = self.normalized_jumpers(edit_jumpers, edited.pins)
+
+            self.selected_kind = "component"
+            self.selected_index = component_index
+            self.current_side.set(side)
+            self.status.set(f"Updated component {edited.name}.")
+            win.destroy()
+            self.redraw()
+
+        bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
+        bottom.pack(fill=tk.X)
+        ttk.Button(bottom, text="Apply", command=apply_changes).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(bottom, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+
+        win.bind("<Return>", lambda event: apply_changes())
+        win.bind("<Escape>", lambda event: win.destroy())
+        win.grab_set()
+        win.wait_window()
+
     def edit_new_component_pins(self):
         w = max(1, int(self.component_w.get()))
         h = max(1, int(self.component_h.get()))
@@ -538,12 +906,13 @@ class PerfboardPlanner(tk.Tk):
         if not pins:
             pins = self.default_pins_for_size(w, h)
 
-        def apply(updated_pins: List[ComponentPin]):
+        def apply(updated_pins: List[ComponentPin], updated_jumpers: Optional[List[ComponentJumper]] = None):
             self.component_pin_template = self.normalized_pins(updated_pins, w, h)
+            self.component_jumper_template = self.normalized_jumpers(updated_jumpers or [], self.component_pin_template)
             self.update_pin_count_label()
             self.status.set("New-component pin layout updated.")
 
-        self.open_pin_editor("Pin layout for new components", w, h, pins, apply)
+        self.open_pin_editor("Pin layout for new components", w, h, pins, apply, jumpers=self.component_jumper_template)
 
     def edit_selected_component_pins(self):
         if self.selected_kind != "component" or self.selected_index is None:
@@ -554,14 +923,23 @@ class PerfboardPlanner(tk.Tk):
         if not pins:
             pins = self.default_pins_for_size(comp.width, comp.height)
 
-        def apply(updated_pins: List[ComponentPin]):
+        def apply(updated_pins: List[ComponentPin], updated_jumpers: Optional[List[ComponentJumper]] = None):
             comp.pins = self.normalized_pins(updated_pins, comp.width, comp.height)
-            self.status.set(f"Pins updated for {comp.name}.")
+            comp.jumpers = self.normalized_jumpers(updated_jumpers or [], comp.pins)
+            self.status.set(f"Pins and internal jumpers updated for {comp.name}.")
             self.redraw()
 
-        self.open_pin_editor(f"Pin layout: {comp.name}", comp.width, comp.height, pins, apply)
+        self.open_pin_editor(f"Pin layout: {comp.name}", comp.width, comp.height, pins, apply, jumpers=comp.jumpers)
 
-    def open_pin_editor(self, title: str, width: int, height: int, pins: List[ComponentPin], on_apply):
+    def open_pin_editor(
+        self,
+        title: str,
+        width: int,
+        height: int,
+        pins: List[ComponentPin],
+        on_apply,
+        jumpers: Optional[List[ComponentJumper]] = None,
+    ):
         win = tk.Toplevel(self)
         win.title(title)
         win.transient(self)
@@ -571,7 +949,8 @@ class PerfboardPlanner(tk.Tk):
             win,
             text=(
                 "Click cells to toggle component attachment pins.\n"
-                "Rows/columns are relative to the component's top-left hole."
+                "Rows/columns are relative to the component's top-left hole.\n"
+                "Cells outside the yellow body area are external leads/pins."
             ),
             justify=tk.LEFT,
             padding=8,
@@ -581,24 +960,71 @@ class PerfboardPlanner(tk.Tk):
         editor = ttk.Frame(win, padding=8)
         editor.pack(fill=tk.BOTH, expand=True)
 
-        canvas_size_x = max(180, width * 42 + 40)
-        canvas_size_y = max(140, height * 42 + 40)
-        pin_canvas = tk.Canvas(editor, width=canvas_size_x, height=canvas_size_y, bg="#f7f7f7", highlightthickness=1, highlightbackground="#999999")
-        pin_canvas.grid(row=0, column=0, rowspan=8, sticky="nsew", padx=(0, 10))
+        external_margin = 2
+        min_row = -external_margin
+        max_row = height + external_margin - 1
+        min_col = -external_margin
+        max_col = width + external_margin - 1
+        total_rows = max_row - min_row + 1
+        total_cols = max_col - min_col + 1
 
-        pin_map: Dict[Tuple[int, int], str] = {(int(pin.row), int(pin.col)): pin.name for pin in self.normalized_pins(pins, width, height)}
-        selected_pos: List[Optional[Tuple[int, int]]] = [None]
         cell = 42
-        left = 24
-        top = 24
+        left = 28
+        top = 28
+        canvas_size_x = max(220, total_cols * cell + 56)
+        canvas_size_y = max(170, total_rows * cell + 56)
+        pin_canvas = tk.Canvas(
+            editor,
+            width=canvas_size_x,
+            height=canvas_size_y,
+            bg="#f7f7f7",
+            highlightthickness=1,
+            highlightbackground="#999999",
+        )
+        pin_canvas.grid(row=0, column=0, rowspan=12, sticky="nsew", padx=(0, 10))
 
-        list_var = tk.StringVar(value="")
+        pin_map: Dict[Tuple[int, int], str] = {
+            (int(pin.row), int(pin.col)): pin.name
+            for pin in self.normalized_pins(pins, width, height)
+        }
+        jumper_list: List[ComponentJumper] = self.normalized_jumpers(jumpers or [], [ComponentPin(name, row, col) for (row, col), name in pin_map.items()])
+        selected_pos: List[Optional[Tuple[int, int]]] = [None]
+
         ttk.Label(editor, text="Pins", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=1, sticky="w")
-        pin_list = tk.Listbox(editor, width=22, height=8, exportselection=False)
+        pin_list = tk.Listbox(editor, width=26, height=8, exportselection=False)
         pin_list.grid(row=1, column=1, sticky="nsew")
+
+        ttk.Label(editor, text="Internal jumpers", font=("TkDefaultFont", 10, "bold")).grid(row=6, column=1, sticky="w", pady=(10, 0))
+        jumper_box = tk.Listbox(editor, width=26, height=5, exportselection=False)
+        jumper_box.grid(row=7, column=1, sticky="nsew")
+
+        jumper_a = tk.StringVar(value="")
+        jumper_b = tk.StringVar(value="")
+        jumper_select_row = ttk.Frame(editor)
+        jumper_select_row.grid(row=8, column=1, sticky="ew", pady=(5, 2))
+        jumper_combo_a = ttk.Combobox(jumper_select_row, textvariable=jumper_a, state="readonly", width=9)
+        jumper_combo_a.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3))
+        jumper_combo_b = ttk.Combobox(jumper_select_row, textvariable=jumper_b, state="readonly", width=9)
+        jumper_combo_b.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def cell_xy(row: int, col: int) -> Tuple[int, int]:
+            return left + (col - min_col) * cell, top + (row - min_row) * cell
 
         def pins_sorted() -> List[Tuple[Tuple[int, int], str]]:
             return sorted(pin_map.items(), key=lambda item: (item[0][0], item[0][1], item[1]))
+
+        def current_pin_objects() -> List[ComponentPin]:
+            return [ComponentPin(name, row, col) for (row, col), name in pins_sorted()]
+
+        def pin_name_to_pos() -> Dict[str, Tuple[int, int]]:
+            result: Dict[str, Tuple[int, int]] = {}
+            for (row, col), name in pins_sorted():
+                result.setdefault(name, (row, col))
+            return result
+
+        def refresh_jumpers():
+            nonlocal jumper_list
+            jumper_list = self.normalized_jumpers(jumper_list, current_pin_objects())
 
         def next_pin_name() -> str:
             existing = set(pin_map.values())
@@ -608,31 +1034,58 @@ class PerfboardPlanner(tk.Tk):
             return f"P{idx}"
 
         def draw_editor():
+            refresh_jumpers()
             pin_canvas.delete("all")
             pin_list.delete(0, tk.END)
-            for row in range(height):
-                for col in range(width):
-                    x = left + col * cell
-                    y = top + row * cell
+            jumper_box.delete(0, tk.END)
+
+            name_to_pos = pin_name_to_pos()
+
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    x, y = cell_xy(row, col)
                     is_selected = selected_pos[0] == (row, col)
-                    fill = "#ffffff" if (row, col) not in pin_map else "#ffe08a"
-                    outline = "#20639b" if is_selected else "#777777"
+                    is_body = 0 <= row < height and 0 <= col < width
+                    has_pin = (row, col) in pin_map
+                    fill = "#fff1c7" if is_body else "#e8edf4"
+                    if has_pin:
+                        fill = "#ffe08a"
+                    outline = "#20639b" if is_selected else ("#999999" if is_body else "#c0c6cf")
                     outline_w = 3 if is_selected else 1
                     pin_canvas.create_rectangle(x - 16, y - 16, x + 16, y + 16, fill=fill, outline=outline, width=outline_w)
                     pin_canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#777777", outline="")
                     pin_canvas.create_text(x, y + 22, text=f"{row},{col}", fill="#555555", font=("TkDefaultFont", 7))
-                    if (row, col) in pin_map:
-                        pin_canvas.create_oval(x - 11, y - 11, x + 11, y + 11, fill="#111111", outline="#ffffff", width=2)
-                        pin_canvas.create_text(x, y, text=pin_map[(row, col)], fill="#ffffff", font=("TkDefaultFont", 8, "bold"))
+
+            for jumper in jumper_list:
+                if jumper.pin_a not in name_to_pos or jumper.pin_b not in name_to_pos:
+                    continue
+                ax, ay = cell_xy(*name_to_pos[jumper.pin_a])
+                bx, by = cell_xy(*name_to_pos[jumper.pin_b])
+                pin_canvas.create_line(ax, ay, bx, by, fill=jumper.color, width=5, capstyle=tk.ROUND)
+                pin_canvas.create_line(ax, ay, bx, by, fill="#ffffff", width=1, capstyle=tk.ROUND)
+
             for (row, col), name in pins_sorted():
+                x, y = cell_xy(row, col)
+                pin_canvas.create_oval(x - 11, y - 11, x + 11, y + 11, fill="#111111", outline="#ffffff", width=2)
+                pin_canvas.create_text(x, y, text=name, fill="#ffffff", font=("TkDefaultFont", 8, "bold"))
                 pin_list.insert(tk.END, f"{name}: row {row}, col {col}")
 
+            pin_names = [name for _, name in pins_sorted()]
+            jumper_combo_a.configure(values=pin_names)
+            jumper_combo_b.configure(values=pin_names)
+            if jumper_a.get() not in pin_names:
+                jumper_a.set(pin_names[0] if pin_names else "")
+            if jumper_b.get() not in pin_names:
+                jumper_b.set(pin_names[1] if len(pin_names) > 1 else (pin_names[0] if pin_names else ""))
+
+            for jumper in jumper_list:
+                jumper_box.insert(tk.END, f"{jumper.pin_a} ↔ {jumper.pin_b}")
+
         def canvas_to_cell(x: int, y: int) -> Optional[Tuple[int, int]]:
-            col = round((x - left) / cell)
-            row = round((y - top) / cell)
-            if 0 <= row < height and 0 <= col < width:
-                cx = left + col * cell
-                cy = top + row * cell
+            col = round((x - left) / cell + min_col)
+            row = round((y - top) / cell + min_row)
+            if min_row <= row <= max_row and min_col <= col <= max_col:
+                cx, cy = cell_xy(row, col)
                 if abs(x - cx) <= 20 and abs(y - cy) <= 20:
                     return row, col
             return None
@@ -643,7 +1096,9 @@ class PerfboardPlanner(tk.Tk):
                 return
             selected_pos[0] = pos
             if pos in pin_map:
+                old_name = pin_map[pos]
                 del pin_map[pos]
+                jumper_list[:] = [j for j in jumper_list if j.pin_a != old_name and j.pin_b != old_name]
             else:
                 pin_map[pos] = next_pin_name()
             draw_editor()
@@ -662,22 +1117,30 @@ class PerfboardPlanner(tk.Tk):
             if pos is None or pos not in pin_map:
                 messagebox.showinfo("Rename pin", "Select or create a pin first.", parent=win)
                 return
-            new_name = simpledialog.askstring("Rename pin", "Pin name:", initialvalue=pin_map[pos], parent=win)
+            old_name = pin_map[pos]
+            new_name = simpledialog.askstring("Rename pin", "Pin name:", initialvalue=old_name, parent=win)
             if new_name is None:
                 return
             new_name = new_name.strip()
             if not new_name:
                 return
             pin_map[pos] = new_name
+            for jumper in jumper_list:
+                if jumper.pin_a == old_name:
+                    jumper.pin_a = new_name
+                if jumper.pin_b == old_name:
+                    jumper.pin_b = new_name
             draw_editor()
 
         def clear_pins():
             pin_map.clear()
+            jumper_list.clear()
             selected_pos[0] = None
             draw_editor()
 
         def set_two_pin_horizontal():
             pin_map.clear()
+            jumper_list.clear()
             pin_map[(0, 0)] = "P1"
             pin_map[(0, width - 1)] = "P2"
             selected_pos[0] = None
@@ -685,6 +1148,7 @@ class PerfboardPlanner(tk.Tk):
 
         def set_four_corners():
             pin_map.clear()
+            jumper_list.clear()
             coords = [(0, 0), (0, width - 1), (height - 1, 0), (height - 1, width - 1)]
             for idx, pos in enumerate(dict.fromkeys(coords), start=1):
                 pin_map[pos] = f"P{idx}"
@@ -693,6 +1157,7 @@ class PerfboardPlanner(tk.Tk):
 
         def set_dip_sides():
             pin_map.clear()
+            jumper_list.clear()
             idx = 1
             for row in range(height):
                 pin_map[(row, 0)] = f"P{idx}"
@@ -704,9 +1169,42 @@ class PerfboardPlanner(tk.Tk):
             selected_pos[0] = None
             draw_editor()
 
+        def set_external_leads():
+            pin_map.clear()
+            jumper_list.clear()
+            pin_map[(height // 2, -1)] = "IN"
+            pin_map[(height // 2, width)] = "OUT"
+            selected_pos[0] = None
+            draw_editor()
+
+        def add_jumper():
+            a = jumper_a.get()
+            b = jumper_b.get()
+            if not a or not b or a == b:
+                messagebox.showinfo("Internal jumper", "Choose two different pins.", parent=win)
+                return
+            key = tuple(sorted((a, b)))
+            existing = {tuple(sorted((j.pin_a, j.pin_b))) for j in jumper_list}
+            if key not in existing:
+                jumper_list.append(ComponentJumper(a, b))
+            draw_editor()
+
+        def remove_selected_jumper():
+            sel = jumper_box.curselection()
+            if not sel:
+                return
+            index = sel[0]
+            if 0 <= index < len(jumper_list):
+                del jumper_list[index]
+            draw_editor()
+
         def apply_and_close():
-            updated = [ComponentPin(name, row, col) for (row, col), name in pins_sorted()]
-            on_apply(updated)
+            updated_pins = current_pin_objects()
+            updated_jumpers = self.normalized_jumpers(jumper_list, updated_pins)
+            try:
+                on_apply(updated_pins, updated_jumpers)
+            except TypeError:
+                on_apply(updated_pins)
             win.destroy()
 
         pin_canvas.bind("<Button-1>", on_editor_click)
@@ -716,8 +1214,11 @@ class PerfboardPlanner(tk.Tk):
         ttk.Button(editor, text="Clear pins", command=clear_pins).grid(row=3, column=1, sticky="ew", pady=2)
         ttk.Separator(editor).grid(row=4, column=1, sticky="ew", pady=6)
         ttk.Button(editor, text="2-pin horizontal", command=set_two_pin_horizontal).grid(row=5, column=1, sticky="ew", pady=2)
-        ttk.Button(editor, text="4 corners", command=set_four_corners).grid(row=6, column=1, sticky="ew", pady=2)
-        ttk.Button(editor, text="DIP sides", command=set_dip_sides).grid(row=7, column=1, sticky="ew", pady=2)
+        ttk.Button(editor, text="4 corners", command=set_four_corners).grid(row=9, column=1, sticky="ew", pady=(8, 2))
+        ttk.Button(editor, text="DIP sides", command=set_dip_sides).grid(row=10, column=1, sticky="ew", pady=2)
+        ttk.Button(editor, text="External leads", command=set_external_leads).grid(row=11, column=1, sticky="ew", pady=2)
+        ttk.Button(editor, text="Add jumper", command=add_jumper).grid(row=12, column=1, sticky="ew", pady=(8, 2))
+        ttk.Button(editor, text="Remove selected jumper", command=remove_selected_jumper).grid(row=13, column=1, sticky="ew", pady=2)
 
         bottom = ttk.Frame(win, padding=8)
         bottom.pack(fill=tk.X)
@@ -758,6 +1259,13 @@ class PerfboardPlanner(tk.Tk):
     def side_label(side: str) -> str:
         return "Front" if side == "front" else "Back"
 
+    def wire_layer_visible(self, layer: str) -> bool:
+        var = self.wire_layer_visibility.get(layer)
+        return True if var is None else bool(var.get())
+
+    def wire_layer_label(self, layer: str) -> str:
+        return dict(self.wire_layers).get(layer, layer or "Main")
+
     @staticmethod
     def _parse_hex_color(color: str) -> Tuple[int, int, int]:
         color = (color or "#000000").strip()
@@ -788,20 +1296,33 @@ class PerfboardPlanner(tk.Tk):
     def update_part_tab_visibility(self):
         if not hasattr(self, "sidebar_notebook") or not hasattr(self, "part_tab"):
             return
-        tabs = self.sidebar_notebook.tabs()
-        part_tab_id = str(self.part_tab)
-        part_mode_active = self.mode.get() == "component"
 
-        if part_mode_active and part_tab_id not in tabs:
-            self.sidebar_notebook.insert(1, self.part_tab, text="Part")
-        elif not part_mode_active and part_tab_id in tabs:
-            was_selected = self.sidebar_notebook.select() == part_tab_id
-            self.sidebar_notebook.forget(self.part_tab)
-            if was_selected and hasattr(self, "tool_tab"):
-                self.sidebar_notebook.select(self.tool_tab)
+        def tab_present(tab) -> bool:
+            return str(tab) in self.sidebar_notebook.tabs()
 
-        if part_mode_active:
+        def remove_tab(tab):
+            if tab_present(tab):
+                was_selected = self.sidebar_notebook.select() == str(tab)
+                self.sidebar_notebook.forget(tab)
+                if was_selected and hasattr(self, "tool_tab"):
+                    self.sidebar_notebook.select(self.tool_tab)
+
+        mode = self.mode.get()
+
+        if mode == "component":
+            if not tab_present(self.part_tab):
+                self.sidebar_notebook.insert(1, self.part_tab, text="Part")
             self.sidebar_notebook.select(self.part_tab)
+        else:
+            remove_tab(self.part_tab)
+
+        if hasattr(self, "wire_tab"):
+            if mode == "wire":
+                if not tab_present(self.wire_tab):
+                    self.sidebar_notebook.insert(1, self.wire_tab, text="Wire")
+                self.sidebar_notebook.select(self.wire_tab)
+            else:
+                remove_tab(self.wire_tab)
 
     def _mode_style(self) -> Dict[str, str]:
         return self.mode_styles.get(self.mode.get(), self.mode_styles["select"])
@@ -1068,6 +1589,7 @@ class PerfboardPlanner(tk.Tk):
                     font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"),
                     tags=tags,
                 )
+                self.draw_component_jumpers(comp, ghost=True)
                 self.draw_component_pins(i, comp, selected=False, ghost=True)
                 continue
 
@@ -1091,7 +1613,59 @@ class PerfboardPlanner(tk.Tk):
                 font=("TkDefaultFont", max(6, round(10 * self.zoom)), "bold"),
                 tags=("component", f"component:{i}"),
             )
+            self.draw_component_jumpers(comp, ghost=False)
             self.draw_component_pins(i, comp, selected, ghost=False)
+
+    def component_pin_position_map(self, comp: Component) -> Dict[str, Tuple[float, float]]:
+        result: Dict[str, Tuple[float, float]] = {}
+        for pin in self.normalized_pins(comp.pins, comp.width, comp.height):
+            result.setdefault(pin.name, self.grid_to_xy(comp.row + pin.row, comp.col + pin.col))
+        return result
+
+    def draw_component_jumpers(self, comp: Component, ghost: bool = False):
+        pins = self.normalized_pins(comp.pins, comp.width, comp.height)
+        jumpers = self.normalized_jumpers(comp.jumpers, pins)
+        if not jumpers:
+            return
+        positions = self.component_pin_position_map(comp)
+        for jumper in jumpers:
+            if jumper.pin_a not in positions or jumper.pin_b not in positions:
+                continue
+            ax, ay = positions[jumper.pin_a]
+            bx, by = positions[jumper.pin_b]
+            if ghost:
+                self.canvas.create_line(
+                    ax,
+                    ay,
+                    bx,
+                    by,
+                    fill="#2f5f73",
+                    width=max(1, round(3 * self.zoom)),
+                    dash=(max(2, round(4 * self.zoom)), max(2, round(3 * self.zoom))),
+                    capstyle=tk.ROUND,
+                    tags=("ghost_internal_jumper",),
+                )
+            else:
+                self.canvas.create_line(
+                    ax,
+                    ay,
+                    bx,
+                    by,
+                    fill=jumper.color,
+                    width=max(2, round(4 * self.zoom)),
+                    capstyle=tk.ROUND,
+                    tags=("internal_jumper",),
+                )
+                self.canvas.create_line(
+                    ax,
+                    ay,
+                    bx,
+                    by,
+                    fill="#ffffff",
+                    width=max(1, round(1 * self.zoom)),
+                    capstyle=tk.ROUND,
+                    tags=("internal_jumper",),
+                )
 
     def draw_component_pins(self, component_index: int, comp: Component, selected: bool, ghost: bool = False):
         pins = self.normalized_pins(comp.pins, comp.width, comp.height)
@@ -1147,6 +1721,8 @@ class PerfboardPlanner(tk.Tk):
     def draw_wires(self, side: Optional[str] = None, ghost: bool = False):
         for i, wire in enumerate(self.wires):
             if side is not None and wire.side != side:
+                continue
+            if not self.wire_layer_visible(getattr(wire, "layer", "main")):
                 continue
             points_xy = [self.grid_to_xy(row, col) for row, col in wire.points]
             selected = (not ghost) and self.selected_kind == "wire" and self.selected_index == i
@@ -1235,6 +1811,58 @@ class PerfboardPlanner(tk.Tk):
                 r = max(3, 5 * self.zoom)
                 self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=self.current_wire_color.get(), outline="")
 
+    def component_index_at(self, x: float, y: float, side: Optional[str] = None) -> Optional[int]:
+        side = self.current_side.get() if side is None else side
+        for i in range(len(self.components) - 1, -1, -1):
+            comp = self.components[i]
+            if comp.side != side:
+                continue
+            x1, y1 = self.grid_to_xy(comp.row, comp.col)
+            x2, y2 = self.grid_to_xy(comp.row + comp.height - 1, comp.col + comp.width - 1)
+            pad = self.scaled_spacing() * 0.5
+            if min(x1, x2) - pad <= x <= max(x1, x2) + pad and min(y1, y2) - pad <= y <= max(y1, y2) + pad:
+                return i
+        return None
+
+    def wire_index_at(self, x: float, y: float, side: Optional[str] = None) -> Optional[int]:
+        side = self.current_side.get() if side is None else side
+        for i in range(len(self.wires) - 1, -1, -1):
+            wire = self.wires[i]
+            if wire.side != side:
+                continue
+            if not self.wire_layer_visible(getattr(wire, "layer", "main")):
+                continue
+            pts = [self.grid_to_xy(row, col) for row, col in wire.points]
+            for a, b in zip(pts, pts[1:]):
+                if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= max(6, 8 * self.zoom):
+                    return i
+        return None
+
+    def on_double_click(self, event):
+        self.canvas.focus_set()
+        if self.mode.get() != "select":
+            return
+        cx, cy = self.canvas_event_xy(event)
+        idx = self.component_index_at(cx, cy, self.current_side.get())
+        if idx is not None:
+            self.selected_kind = "component"
+            self.selected_index = idx
+            self.drag_start_grid = None
+            self.drag_component_original = None
+            self.redraw()
+            self.open_component_editor(idx)
+            return "break"
+
+        wire_idx = self.wire_index_at(cx, cy, self.current_side.get())
+        if wire_idx is not None:
+            self.selected_kind = "wire"
+            self.selected_index = wire_idx
+            self.drag_start_grid = None
+            self.drag_component_original = None
+            self.redraw()
+            self.open_wire_editor(wire_idx)
+            return "break"
+
     def on_click(self, event):
         self.canvas.focus_set()
         cx, cy = self.canvas_event_xy(event)
@@ -1260,6 +1888,7 @@ class PerfboardPlanner(tk.Tk):
                 self.current_color.get(),
                 side=self.current_side.get(),
                 pins=self.copy_pins(pins),
+                jumpers=self.normalized_jumpers(self.component_jumper_template, pins),
             ))
             self.selected_kind = "component"
             self.selected_index = len(self.components) - 1
@@ -1388,6 +2017,8 @@ class PerfboardPlanner(tk.Tk):
             wire = self.wires[i]
             if wire.side != self.current_side.get():
                 continue
+            if not self.wire_layer_visible(getattr(wire, "layer", "main")):
+                continue
             pts = [self.grid_to_xy(row, col) for row, col in wire.points]
             for a, b in zip(pts, pts[1:]):
                 if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= max(6, 8 * self.zoom):
@@ -1425,7 +2056,7 @@ class PerfboardPlanner(tk.Tk):
         name = ""
         if ask_name:
             name = simpledialog.askstring("Wire name", "Wire name:", initialvalue="") or ""
-        self.wires.append(Wire(name, list(self.temp_wire_points), self.current_wire_color.get(), side=self.current_side.get()))
+        self.wires.append(Wire(name, list(self.temp_wire_points), self.current_wire_color.get(), side=self.current_side.get(), layer=self.current_wire_layer.get()))
         self.temp_wire_points.clear()
         self.selected_kind = "wire"
         self.selected_index = len(self.wires) - 1
@@ -1588,7 +2219,7 @@ class PerfboardPlanner(tk.Tk):
         if not path:
             return
         data = {
-            "version": 3,
+            "version": 5,
             "board": {"rows": self.rows, "cols": self.cols, "spacing": self.spacing},
             "components": [asdict(c) for c in self.components],
             "wires": [asdict(w) for w in self.wires],
@@ -1615,6 +2246,8 @@ class PerfboardPlanner(tk.Tk):
             self.components = []
             for c in data.get("components", []):
                 pins = [ComponentPin(pin.get("name", ""), int(pin.get("row", 0)), int(pin.get("col", 0))) for pin in c.get("pins", [])]
+                jumpers = [ComponentJumper(j.get("pin_a", ""), j.get("pin_b", ""), j.get("color", "#00aaff")) for j in c.get("jumpers", [])]
+                normalized_pins = self.normalized_pins(pins, int(c.get("width", 1)), int(c.get("height", 1)))
                 self.components.append(Component(
                     c.get("name", "Part"),
                     int(c.get("row", 0)),
@@ -1623,13 +2256,15 @@ class PerfboardPlanner(tk.Tk):
                     int(c.get("height", 1)),
                     c.get("color", "#ffcc66"),
                     side=c.get("side", "front"),
-                    pins=pins,
+                    pins=normalized_pins,
+                    jumpers=self.normalized_jumpers(jumpers, normalized_pins),
                 ))
             self.wires = [Wire(
                 w.get("name", ""),
                 [tuple(p) for p in w.get("points", [])],
                 w.get("color", "#d00000"),
                 side=w.get("side", "front"),
+                layer=w.get("layer", "main"),
             ) for w in data.get("wires", [])]
             self.selected_kind = None
             self.selected_index = None
