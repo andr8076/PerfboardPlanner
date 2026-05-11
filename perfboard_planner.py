@@ -110,7 +110,7 @@ class PerfboardPlanner(tk.Tk):
             "wire": {
                 "label": "DRAW WIRE",
                 "color": "#b00020",
-                "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire. Only the overlapping parts of wires are separated automatically. A small hop marker means crossing without connection; a small solder dot means shared-hole connection.",
+                "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire. Overlaps are separated automatically. Pin markers show which wires terminate on component pins. Bridge gaps mean crossing without connection; solder dots mean shared-hole connection.",
             },
             "label": {
                 "label": "TEXT LABEL",
@@ -1789,25 +1789,73 @@ class PerfboardPlanner(tk.Tk):
                 continue
 
             outline = "#ffffff" if not selected else "#00d5ff"
-            self.canvas.create_oval(
-                x - r,
-                y - r,
-                x + r,
-                y + r,
-                fill="#111111",
-                outline=outline,
-                width=max(1, round(2 * self.zoom)),
-                tags=("component_pin", f"component_pin:{component_index}:{pin_index}", "component", f"component:{component_index}"),
-            )
+            pin_row = int(comp.row + pin.row)
+            pin_col = int(comp.col + pin.col)
+            wire_colors = self.wire_colors_at_grid_point(comp.side, pin_row, pin_col)
+            pin_tags = ("component_pin", f"component_pin:{component_index}:{pin_index}", "component", f"component:{component_index}")
+
+            if wire_colors:
+                # A connected component pin gets a coloured terminal marker. This
+                # answers the important question: does this wire terminate on
+                # this pin, or is it merely passing nearby/over it?
+                self.draw_multi_color_disc(
+                    x,
+                    y,
+                    max(r + 2 * self.zoom, 7 * self.zoom),
+                    wire_colors,
+                    outline="#111111",
+                    tags=pin_tags,
+                )
+                self.canvas.create_oval(
+                    x - r * 0.55,
+                    y - r * 0.55,
+                    x + r * 0.55,
+                    y + r * 0.55,
+                    fill="#111111",
+                    outline="#ffffff",
+                    width=max(1, round(1 * self.zoom)),
+                    tags=pin_tags,
+                )
+            else:
+                self.canvas.create_oval(
+                    x - r,
+                    y - r,
+                    x + r,
+                    y + r,
+                    fill="#111111",
+                    outline=outline,
+                    width=max(1, round(2 * self.zoom)),
+                    tags=pin_tags,
+                )
+
             if selected or self.zoom >= 1.15:
+                text_fill = "#ffffff" if selected else "#111111"
+                if wire_colors:
+                    # Small white backing keeps pin names readable when they sit
+                    # on top of bright wire colours.
+                    tx = x + 7 * self.zoom
+                    ty = y - 8 * self.zoom
+                    label_text = pin.name
+                    approx_w = max(12, len(label_text) * 6 * self.zoom)
+                    approx_h = max(8, 9 * self.zoom)
+                    self.canvas.create_rectangle(
+                        tx - 2 * self.zoom,
+                        ty - approx_h / 2,
+                        tx + approx_w,
+                        ty + approx_h / 2,
+                        fill="#ffffff",
+                        outline="",
+                        tags=pin_tags,
+                    )
+                    text_fill = "#111111"
                 self.canvas.create_text(
                     x + 7 * self.zoom,
                     y - 8 * self.zoom,
                     text=pin.name,
                     anchor="w",
-                    fill="#ffffff" if selected else "#111111",
+                    fill=text_fill,
                     font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"),
-                    tags=("component_pin", f"component_pin:{component_index}:{pin_index}", "component", f"component:{component_index}"),
+                    tags=pin_tags,
                 )
 
 
@@ -2020,6 +2068,75 @@ class PerfboardPlanner(tk.Tk):
             return x, y, t, u
         return None
 
+    def wire_indices_at_grid_point(self, side: str, row: int, col: int) -> List[int]:
+        """Return same-side wires that explicitly use this snapped hole.
+
+        Only explicit wire points count as electrical attachment points. A wire
+        that merely passes over a hole between two points is still drawn there,
+        but it is not marked as soldered/attached to that hole.
+        """
+        point = (int(row), int(col))
+        result: List[int] = []
+        for i, wire in enumerate(self.wires):
+            if wire.side != side:
+                continue
+            if point in {(int(r), int(c)) for r, c in wire.points}:
+                result.append(i)
+        return result
+
+    def wire_colors_at_grid_point(self, side: str, row: int, col: int) -> List[str]:
+        colors: List[str] = []
+        for index in self.wire_indices_at_grid_point(side, row, col):
+            color = self.wires[index].color or "#000000"
+            if color not in colors:
+                colors.append(color)
+        return colors
+
+    def draw_multi_color_disc(self, x: float, y: float, radius: float, colors: List[str], outline: str = "#111111", tags: Tuple[str, ...] = ()): 
+        """Draw a small connection dot. Multiple colors are split into slices."""
+        clean_colors = [c for c in colors if c]
+        if not clean_colors:
+            clean_colors = ["#111111"]
+
+        self.canvas.create_oval(
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            fill="#ffffff",
+            outline=outline,
+            width=max(1, round(1.5 * self.zoom)),
+            tags=tags,
+        )
+
+        inner = max(1.0, radius - max(1.5, 2.0 * self.zoom))
+        if len(clean_colors) == 1:
+            self.canvas.create_oval(
+                x - inner,
+                y - inner,
+                x + inner,
+                y + inner,
+                fill=clean_colors[0],
+                outline="",
+                tags=tags,
+            )
+            return
+
+        extent = 360 / min(len(clean_colors), 6)
+        for idx, color in enumerate(clean_colors[:6]):
+            self.canvas.create_arc(
+                x - inner,
+                y - inner,
+                x + inner,
+                y + inner,
+                start=90 - idx * extent,
+                extent=-extent,
+                style=tk.PIESLICE,
+                fill=color,
+                outline="",
+                tags=tags,
+            )
+
     def explicit_wire_junctions(self, side: str) -> Dict[Tuple[int, int], List[int]]:
         holes: Dict[Tuple[int, int], List[int]] = {}
         for i, wire in enumerate(self.wires):
@@ -2030,32 +2147,28 @@ class PerfboardPlanner(tk.Tk):
         return {point: indices for point, indices in holes.items() if len(indices) > 1}
 
     def draw_wire_connection_markers(self, side: str):
-        # Solid solder dots mean a true shared hole/junction. Bridge symbols mean
-        # a visual crossing only, with no electrical connection implied.
+        # Connection markers use two different visual languages:
+        #   - Solder dots: true electrical connection at an explicit shared hole.
+        #   - Bridges: visual crossing only; the lower wire gets a small board-
+        #     colored break and the upper wire gets a black-outlined hop.
         junctions = self.explicit_wire_junctions(side)
         junction_xy = []
         for point, indices in junctions.items():
             x, y = self.grid_to_xy(*point)
             junction_xy.append((x, y))
-            r = max(3, 4.3 * self.zoom)
-            self.canvas.create_oval(
-                x - r,
-                y - r,
-                x + r,
-                y + r,
-                fill="#ffffff",
+            colors = []
+            for idx in indices:
+                if 0 <= idx < len(self.wires):
+                    color = self.wires[idx].color or "#000000"
+                    if color not in colors:
+                        colors.append(color)
+            r = max(4.5, 6.0 * self.zoom)
+            self.draw_multi_color_disc(
+                x,
+                y,
+                r,
+                colors or ["#111111"],
                 outline="#111111",
-                width=max(1, round(1.5 * self.zoom)),
-                tags=("wire_junction",),
-            )
-            inner = max(1.5, 2.0 * self.zoom)
-            self.canvas.create_oval(
-                x - inner,
-                y - inner,
-                x + inner,
-                y + inner,
-                fill="#111111",
-                outline="",
                 tags=("wire_junction",),
             )
 
@@ -2090,34 +2203,85 @@ class PerfboardPlanner(tk.Tk):
                         if key in seen:
                             continue
                         seen.add(key)
-                        # Later-created wire is shown as the one that hops over.
-                        top_index, top_segment = (j, seg_b) if j > i else (i, seg_a)
-                        markers.append((x, y, self.wires[top_index], top_segment))
 
-        for x, y, top_wire, top_segment in markers:
-            self.draw_wire_bridge_marker(x, y, top_wire, top_segment)
+                        # Later-created wire is displayed as the upper/hopping
+                        # wire. The lower wire gets the small visible break.
+                        if j > i:
+                            top_index, top_segment = j, seg_b
+                            bottom_segment = seg_a
+                        else:
+                            top_index, top_segment = i, seg_a
+                            bottom_segment = seg_b
+                        markers.append((x, y, self.wires[top_index], top_segment, bottom_segment))
 
-    def draw_wire_bridge_marker(self, x: float, y: float, wire: Wire, segment):
-        (ax, ay), (bx, by), _ = segment
+        for x, y, top_wire, top_segment, bottom_segment in markers:
+            self.draw_wire_bridge_marker(x, y, top_wire, top_segment, bottom_segment)
+
+    def draw_wire_bridge_marker(self, x: float, y: float, wire: Wire, top_segment, bottom_segment=None):
+        (ax, ay), (bx, by), _ = top_segment
         horizontal = abs(bx - ax) >= abs(by - ay)
+        base_width = max(3, round(5 * self.zoom))
+
+        # First cut a small gap into the lower wire. This makes same-colour
+        # crossings readable: two red wires no longer melt into one red blob.
+        if bottom_segment is not None:
+            (lx1, ly1), (lx2, ly2), _ = bottom_segment
+            dx = lx2 - lx1
+            dy = ly2 - ly1
+            length = max((dx * dx + dy * dy) ** 0.5, 1.0)
+            ux = dx / length
+            uy = dy / length
+            gap_half = max(6.5, 8.5 * self.zoom)
+            erase_width = base_width + max(5, round(5 * self.zoom))
+            self.canvas.create_line(
+                x - ux * gap_half,
+                y - uy * gap_half,
+                x + ux * gap_half,
+                y + uy * gap_half,
+                fill="#117a35",
+                width=erase_width,
+                capstyle=tk.ROUND,
+                tags=("wire_bridge_gap",),
+            )
+            self.canvas.create_line(
+                x - ux * gap_half,
+                y - uy * gap_half,
+                x + ux * gap_half,
+                y + uy * gap_half,
+                fill="#0b5f29",
+                width=max(1, round(1 * self.zoom)),
+                capstyle=tk.ROUND,
+                tags=("wire_bridge_gap",),
+            )
+
         r_x = max(7, 9 * self.zoom)
         r_y = max(5, 7 * self.zoom)
-        # Draw only a small hop symbol. The old filled oval was too visually
-        # aggressive and could look like a green blob over the circuit.
         if horizontal:
             bbox = (x - r_x, y - r_y, x + r_x, y + r_y)
             start = 0
         else:
             bbox = (x - r_y, y - r_x, x + r_y, y + r_x)
             start = 90
-        base_width = max(3, round(5 * self.zoom))
+
+        # Black outline + white separator + coloured hop. The black outline is
+        # specifically for same-colour crossings, where a coloured hop alone is
+        # too easy to mistake for a junction.
+        self.canvas.create_arc(
+            *bbox,
+            start=start,
+            extent=180,
+            style=tk.ARC,
+            outline="#111111",
+            width=base_width + max(5, round(5 * self.zoom)),
+            tags=("wire_bridge",),
+        )
         self.canvas.create_arc(
             *bbox,
             start=start,
             extent=180,
             style=tk.ARC,
             outline="#ffffff",
-            width=base_width + max(2, round(3 * self.zoom)),
+            width=base_width + max(2, round(2 * self.zoom)),
             tags=("wire_bridge",),
         )
         self.canvas.create_arc(
@@ -2178,7 +2342,28 @@ class PerfboardPlanner(tk.Tk):
                 if ghost:
                     self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="", outline=wire.color, width=max(1, round(1 * self.zoom)), tags=("ghost_wire", f"ghost_wire:{i}"))
                 else:
-                    self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=wire.color, outline="", tags=("wire", f"wire:{i}"))
+                    # Explicit snapped wire points are possible solder/terminal
+                    # points, so give them an outline. Without this, same-colour
+                    # crossings and terminals can blur into the wire body.
+                    self.canvas.create_oval(
+                        x - r - max(1, 1.2 * self.zoom),
+                        y - r - max(1, 1.2 * self.zoom),
+                        x + r + max(1, 1.2 * self.zoom),
+                        y + r + max(1, 1.2 * self.zoom),
+                        fill="#111111",
+                        outline="",
+                        tags=("wire", f"wire:{i}"),
+                    )
+                    self.canvas.create_oval(
+                        x - r,
+                        y - r,
+                        x + r,
+                        y + r,
+                        fill=wire.color,
+                        outline="#ffffff",
+                        width=max(1, round(1 * self.zoom)),
+                        tags=("wire", f"wire:{i}"),
+                    )
             if wire.name and len(path) >= 2 and not ghost:
                 lx, ly = path[len(path) // 2]
                 self.canvas.create_text(lx + 8 * self.zoom, ly - 10 * self.zoom, text=wire.name, anchor="w", fill="#111111", font=("TkDefaultFont", max(6, round(9 * self.zoom))), tags=("wire", f"wire:{i}"))
