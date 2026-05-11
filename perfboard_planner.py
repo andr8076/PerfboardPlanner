@@ -754,18 +754,28 @@ class PerfboardPlanner(tk.Tk):
         self.canvas_border.rowconfigure(0, weight=1)
         self.canvas_border.columnconfigure(0, weight=1)
 
-        self.wire_color_panel = ttk.Frame(board_content, padding=(6, 6), width=150)
+        # Compact wire-colour visibility rail. It behaves like a small visual
+        # legend: each swatch is the actual wire colour, the number is the
+        # amount of wires using it, and clicking toggles visibility.
+        self.wire_color_panel = tk.Frame(board_content, bg="#e6e6e6", width=62, padx=5, pady=6)
         self.wire_color_panel.pack(side=tk.RIGHT, fill=tk.Y)
         self.wire_color_panel.pack_propagate(False)
-        ttk.Label(self.wire_color_panel, text="Wire colors", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
-        ttk.Label(
+        tk.Label(
             self.wire_color_panel,
-            text="Click a color to hide/show wires.",
-            justify=tk.LEFT,
-            wraplength=130,
-        ).pack(anchor="w", pady=(2, 5))
-        ttk.Button(self.wire_color_panel, text="Show all", command=self.show_all_wire_colors).pack(fill=tk.X, pady=(0, 5))
-        self.wire_color_list = ttk.Frame(self.wire_color_panel)
+            text="Wires",
+            bg="#e6e6e6",
+            fg="#333333",
+            font=("TkDefaultFont", 8, "bold"),
+        ).pack(anchor="center", pady=(0, 4))
+        tk.Button(
+            self.wire_color_panel,
+            text="All",
+            font=("TkDefaultFont", 8),
+            padx=2,
+            pady=1,
+            command=self.show_all_wire_colors,
+        ).pack(fill=tk.X, pady=(0, 6))
+        self.wire_color_list = tk.Frame(self.wire_color_panel, bg="#e6e6e6")
         self.wire_color_list.pack(fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(
@@ -1910,29 +1920,63 @@ class PerfboardPlanner(tk.Tk):
         for child in self.wire_color_list.winfo_children():
             child.destroy()
 
+        panel_bg = getattr(self.wire_color_list, "cget", lambda _k: "#e6e6e6")("bg")
+
         if not summary:
-            ttk.Label(self.wire_color_list, text="No wires yet.", wraplength=130, justify=tk.LEFT).pack(anchor="w", pady=(4, 0))
+            tk.Label(
+                self.wire_color_list,
+                text="—",
+                bg=panel_bg,
+                fg="#777777",
+                font=("TkDefaultFont", 13),
+            ).pack(anchor="center", pady=(8, 0))
             return
 
         for color, front, back, total in summary:
             hidden = color in self.hidden_wire_colors
-            text = f"{'Show' if hidden else 'Hide'} {color}\nF {front}  B {back}"
-            btn = tk.Button(
+            fg = self.readable_text_color(color)
+            swatch = tk.Canvas(
                 self.wire_color_list,
-                text=text,
-                bg=color,
-                fg=self.readable_text_color(color),
-                activebackground=color,
-                activeforeground=self.readable_text_color(color),
-                relief=tk.SUNKEN if hidden else tk.RAISED,
-                bd=3 if hidden else 2,
-                padx=4,
-                pady=4,
-                command=lambda c=color: self.toggle_wire_color_visibility(c),
+                width=46,
+                height=32,
+                bg=panel_bg,
+                highlightthickness=0,
+                cursor="hand2",
             )
-            btn.pack(fill=tk.X, pady=(0, 5))
+            swatch.pack(anchor="center", pady=(0, 6))
+
+            # The swatch itself is the control. A hidden colour keeps its hue,
+            # but gets diagonal hatching and an "×" marker instead of a bulky
+            # text label.
+            try:
+                swatch.create_rectangle(
+                    3,
+                    3,
+                    43,
+                    29,
+                    fill=color,
+                    outline="#202020" if not hidden else "#666666",
+                    width=2,
+                )
+            except tk.TclError:
+                swatch.create_rectangle(3, 3, 43, 29, fill="#777777", outline="#202020", width=2)
+                fg = "#ffffff"
+
             if hidden:
-                ttk.Label(self.wire_color_list, text="hidden", foreground="#777777").pack(anchor="e", pady=(0, 4))
+                for x in range(-28, 62, 9):
+                    swatch.create_line(x, 31, x + 31, 0, fill="#f2f2f2", width=2)
+                swatch.create_rectangle(3, 3, 43, 29, outline="#444444", width=2)
+                swatch.create_text(23, 16, text="×", fill=fg, font=("TkDefaultFont", 13, "bold"))
+            else:
+                swatch.create_text(23, 16, text=str(total), fill=fg, font=("TkDefaultFont", 9, "bold"))
+
+            status_text = (
+                f"{color}: {total} wire{'s' if total != 1 else ''} "
+                f"(front {front}, back {back}). Click to {'show' if hidden else 'hide'}."
+            )
+            swatch.bind("<Button-1>", lambda _event, c=color: self.toggle_wire_color_visibility(c))
+            swatch.bind("<Enter>", lambda _event, text=status_text: self.status.set(text))
+            swatch.bind("<Leave>", lambda _event: self.status.set("Ready"))
 
     def update_part_tab_visibility(self):
         if not hasattr(self, "sidebar_notebook") or not hasattr(self, "part_tab"):
