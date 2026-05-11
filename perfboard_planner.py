@@ -171,22 +171,31 @@ class PerfboardPlanner(tk.Tk):
             pass
 
     def _build_ui(self):
-        root = ttk.Frame(self)
-        root.pack(fill=tk.BOTH, expand=True)
+        # A draggable pane divider lets the sidebar be resized instead of
+        # forcing every control into one fixed-width column.
+        main_pane = tk.PanedWindow(
+            self,
+            orient=tk.HORIZONTAL,
+            sashwidth=7,
+            sashrelief=tk.RAISED,
+            bg="#d0d0d0",
+            bd=0,
+        )
+        main_pane.pack(fill=tk.BOTH, expand=True)
 
-        # The left panel got crowded as the app grew, so it now uses a
-        # scrollable container plus tabs. The most common controls stay near
-        # the top, while less common settings are grouped away.
-        side_outer = ttk.Frame(root, width=270)
-        side_outer.pack(side=tk.LEFT, fill=tk.Y)
-        side_outer.pack_propagate(False)
+        # The left panel uses a scrollable tab area for secondary controls, plus
+        # a fixed bottom quickbar for modes and layers.
+        side_outer = ttk.Frame(main_pane, width=340)
+        side_outer.grid_rowconfigure(0, weight=1)
+        side_outer.grid_columnconfigure(0, weight=1)
+        main_pane.add(side_outer, minsize=260)
 
         side_scroll_area = ttk.Frame(side_outer)
-        side_scroll_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        side_scroll_area.grid(row=0, column=0, sticky="nsew")
         side_scroll_area.rowconfigure(0, weight=1)
         side_scroll_area.columnconfigure(0, weight=1)
 
-        side_canvas = tk.Canvas(side_scroll_area, borderwidth=0, highlightthickness=0, width=250)
+        side_canvas = tk.Canvas(side_scroll_area, borderwidth=0, highlightthickness=0, width=320)
         side_canvas.grid(row=0, column=0, sticky="nsew")
         side_bar = ttk.Scrollbar(side_scroll_area, orient=tk.VERTICAL, command=side_canvas.yview)
         side_bar.grid(row=0, column=1, sticky="ns")
@@ -246,11 +255,6 @@ class PerfboardPlanner(tk.Tk):
         self.sidebar_notebook.add(file_tab, text="File")
 
         # --- Tool tab -----------------------------------------------------
-        ttk.Label(tool_tab, text="Mode", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        for text, value in [("Select / move", "select"), ("Add component", "component"), ("Draw wire", "wire"), ("Text label", "label")]:
-            ttk.Radiobutton(tool_tab, text=text, variable=self.mode, value=value, command=self._mode_changed).pack(anchor="w", pady=2)
-
-        ttk.Separator(tool_tab).pack(fill=tk.X, pady=10)
         ttk.Label(tool_tab, text="Selected item", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         ttk.Button(tool_tab, text="Delete selected", command=self.delete_selected).pack(fill=tk.X, pady=(4, 2))
         ttk.Button(tool_tab, text="Send selected to other side", command=self.move_selected_to_other_side).pack(fill=tk.X, pady=2)
@@ -259,11 +263,11 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(
             tool_tab,
             text=(
-                "Most work happens here.\n\n"
-                "Tip: the colored banner above the board shows the active mode and side."
+                "The active mode and board side are controlled from the fixed quickbar at the bottom of the sidebar.\n\n"
+                "The colored banner above the board still shows what is active."
             ),
             justify=tk.LEFT,
-            wraplength=210,
+            wraplength=270,
         ).pack(anchor="w")
 
         # --- Part tab -----------------------------------------------------
@@ -311,19 +315,10 @@ class PerfboardPlanner(tk.Tk):
                 "Delete/Backspace = delete"
             ),
             justify=tk.LEFT,
-            wraplength=210,
+            wraplength=270,
         ).pack(anchor="w")
 
         # --- View tab -----------------------------------------------------
-        ttk.Label(view_tab, text="Board side", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        side_row = ttk.Frame(view_tab)
-        side_row.pack(anchor="w", fill=tk.X, pady=(5, 2))
-        ttk.Radiobutton(side_row, text="Front", variable=self.current_side, value="front", command=self._side_changed).pack(side=tk.LEFT)
-        ttk.Radiobutton(side_row, text="Back", variable=self.current_side, value="back", command=self._side_changed).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Checkbutton(view_tab, text="See-through other side", variable=self.show_opposite_layer, command=self.redraw).pack(anchor="w", pady=(5, 0))
-        ttk.Checkbutton(view_tab, text="Other-side pins/wires", variable=self.show_opposite_connections, command=self.redraw).pack(anchor="w")
-
-        ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
         ttk.Label(view_tab, text="Zoom", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         zoom_row = ttk.Frame(view_tab)
         zoom_row.pack(anchor="w", pady=(5, 4), fill=tk.X)
@@ -364,14 +359,71 @@ class PerfboardPlanner(tk.Tk):
             "right-click / Enter = finish wire\n"
             "Esc = cancel wire"
         )
-        ttk.Label(file_tab, text=help_text, justify=tk.LEFT, wraplength=215).pack(anchor="w", pady=4)
+        ttk.Label(file_tab, text=help_text, justify=tk.LEFT, wraplength=270).pack(anchor="w", pady=4)
 
+        quickbar = ttk.Frame(side_outer, padding=(8, 6))
+        quickbar.grid(row=1, column=0, sticky="ew")
+        quickbar.columnconfigure(0, weight=1)
+
+        ttk.Label(quickbar, text="Mode", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        mode_tabs = ttk.Frame(quickbar)
+        mode_tabs.pack(fill=tk.X, pady=(2, 6))
+        for text_label, value in [("Select", "select"), ("Part", "component"), ("Wire", "wire"), ("Text", "label")]:
+            ttk.Radiobutton(
+                mode_tabs,
+                text=text_label,
+                variable=self.mode,
+                value=value,
+                command=self._mode_changed,
+                style="Toolbutton",
+                width=7,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+
+        ttk.Label(quickbar, text="Layers", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        layer_tabs = ttk.Frame(quickbar)
+        layer_tabs.pack(fill=tk.X, pady=(2, 0))
+        ttk.Radiobutton(
+            layer_tabs,
+            text="Front",
+            variable=self.current_side,
+            value="front",
+            command=self._side_changed,
+            style="Toolbutton",
+            width=7,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Radiobutton(
+            layer_tabs,
+            text="Back",
+            variable=self.current_side,
+            value="back",
+            command=self._side_changed,
+            style="Toolbutton",
+            width=7,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Checkbutton(
+            layer_tabs,
+            text="Ghost",
+            variable=self.show_opposite_layer,
+            command=self.toggle_layer_display,
+            style="Toolbutton",
+            width=7,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Checkbutton(
+            layer_tabs,
+            text="Pins",
+            variable=self.show_opposite_connections,
+            command=self.toggle_layer_display,
+            style="Toolbutton",
+            width=7,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Separator(side_outer).grid(row=2, column=0, sticky="ew")
         self.status = tk.StringVar(value="Ready")
-        ttk.Separator(side_outer).pack(fill=tk.X)
-        ttk.Label(side_outer, textvariable=self.status, wraplength=245, padding=8).pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(side_outer, textvariable=self.status, wraplength=315, padding=8).grid(row=3, column=0, sticky="ew")
 
-        board_area = ttk.Frame(root)
-        board_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        board_area = ttk.Frame(main_pane)
+        main_pane.add(board_area, minsize=380)
+        self.after(50, lambda: main_pane.sash_place(0, 340, 0))
 
         self.mode_banner = tk.Label(
             board_area,
@@ -685,6 +737,10 @@ class PerfboardPlanner(tk.Tk):
         self.selected_index = None
         self._update_mode_ui()
         self.status.set(f"Viewing {self.current_side_label()} side. New items are placed on this side.")
+        self.redraw()
+
+    def toggle_layer_display(self):
+        self._update_mode_ui()
         self.redraw()
 
     def current_side_label(self) -> str:
