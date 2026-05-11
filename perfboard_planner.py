@@ -1,8 +1,9 @@
 import json
+import math
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from dataclasses import dataclass, asdict, field
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Set
 
 
 @dataclass
@@ -28,6 +29,7 @@ class Component:
     height: int
     color: str
     side: str = "front"
+    rotation: int = 0  # visual component body angle in degrees
     pins: List[ComponentPin] = field(default_factory=list)
     jumpers: List[ComponentJumper] = field(default_factory=list)
 
@@ -69,11 +71,14 @@ class PerfboardPlanner(tk.Tk):
         self.show_opposite_layer = tk.BooleanVar(value=True)      # opposite-side component bodies
         self.show_opposite_pins = tk.BooleanVar(value=True)       # opposite-side component pins / connection points
         self.show_opposite_wires = tk.BooleanVar(value=True)      # opposite-side wires
+        self.show_component_names = tk.BooleanVar(value=True)     # active/ghost component names
+        self.show_component_pin_names = tk.BooleanVar(value=True) # active/ghost pin labels
 
         self.mode = tk.StringVar(value="select")
         self.current_color = tk.StringVar(value="#ffcc66")
         self.current_wire_color = tk.StringVar(value="#d00000")
         self.current_wire_lane = tk.IntVar(value=0)
+        self.current_component_rotation = tk.IntVar(value=0)
         # Wire layers used to be Main/Aux. That turned out to be the wrong
         # model: wires are now a normal editable item on each board side, and
         # the opposite-side wires have their own ghost visibility toggle.
@@ -89,6 +94,13 @@ class PerfboardPlanner(tk.Tk):
 
         self.selected_kind: Optional[str] = None
         self.selected_index: Optional[int] = None
+        # Multi-selection is stored as (kind, index), where kind is
+        # "component" or "wire". selected_kind/selected_index remain as the
+        # primary item so old single-item tools still work.
+        self.selected_items: Set[Tuple[str, int]] = set()
+        self.clipboard_items: List[Dict[str, Any]] = []
+        self.clipboard_paste_count = 0
+        self.clipboard_bounds: Optional[Tuple[int, int, int, int]] = None
         self.temp_wire_points: List[Tuple[int, int]] = []
         self.preview_line_id: Optional[int] = None
         # Calculated on every redraw. Used only for visual separation of
@@ -155,8 +167,25 @@ class PerfboardPlanner(tk.Tk):
             height=int(comp.height),
             color=comp.color,
             side=comp.side if side is None else side,
+            rotation=cls.normalized_angle(getattr(comp, "rotation", 0)),
             pins=cls.copy_pins(comp.pins),
             jumpers=cls.copy_jumpers(comp.jumpers),
+        )
+
+    @classmethod
+    def clone_wire(
+        cls,
+        wire: Wire,
+        points: Optional[List[Tuple[int, int]]] = None,
+        side: Optional[str] = None,
+    ) -> Wire:
+        return Wire(
+            name=wire.name,
+            points=list(wire.points if points is None else points),
+            color=wire.color,
+            side=wire.side if side is None else side,
+            layer=getattr(wire, "layer", "main") or "main",
+            lane=0,
         )
 
     @staticmethod
@@ -195,6 +224,20 @@ class PerfboardPlanner(tk.Tk):
             normalized.append(ComponentJumper(a, b, getattr(jumper, "color", "#00aaff") or "#00aaff"))
             used.add(key)
         return normalized
+
+    @staticmethod
+    def normalized_angle(value) -> int:
+        try:
+            angle = int(round(float(value)))
+        except Exception:
+            angle = 0
+        # Keep the visual angle tidy but allow diagonal bodies.
+        angle %= 360
+        return angle
+
+    @staticmethod
+    def rotate_point_90_clockwise(row: int, col: int, height: int) -> Tuple[int, int]:
+        return int(col), int(height - 1 - row)
 
     def update_pin_count_label(self):
         if not hasattr(self, "pin_count_label"):
@@ -311,8 +354,10 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(tool_tab, text="Selected item", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         ttk.Button(tool_tab, text="Edit selected component", command=self.edit_selected_component).pack(fill=tk.X, pady=(4, 2))
         ttk.Button(tool_tab, text="Edit selected wire", command=self.edit_selected_wire).pack(fill=tk.X, pady=2)
+        ttk.Button(tool_tab, text="Edit selected items…", command=self.edit_selected_items).pack(fill=tk.X, pady=2)
         ttk.Button(tool_tab, text="Delete selected", command=self.delete_selected).pack(fill=tk.X, pady=2)
         ttk.Button(tool_tab, text="Send selected to other side", command=self.move_selected_to_other_side).pack(fill=tk.X, pady=2)
+        ttk.Button(tool_tab, text="Rotate selected component(s)", command=self.rotate_selected_components).pack(fill=tk.X, pady=2)
 
         ttk.Separator(tool_tab).pack(fill=tk.X, pady=10)
         ttk.Label(
@@ -336,6 +381,17 @@ class PerfboardPlanner(tk.Tk):
         ttk.Spinbox(size_row, from_=1, to=30, textvariable=self.component_w, width=4).pack(side=tk.LEFT, padx=(3, 8))
         ttk.Label(size_row, text="H").pack(side=tk.LEFT)
         ttk.Spinbox(size_row, from_=1, to=30, textvariable=self.component_h, width=4).pack(side=tk.LEFT, padx=3)
+
+        angle_row = ttk.Frame(part_tab)
+        angle_row.pack(anchor="w", pady=(0, 6), fill=tk.X)
+        ttk.Label(angle_row, text="Body angle").pack(side=tk.LEFT)
+        ttk.Combobox(
+            angle_row,
+            textvariable=self.current_component_rotation,
+            values=[0, 45, 90, 135, 180, 225, 270, 315],
+            width=6,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Button(part_tab, text="Component color", command=self.choose_component_color).pack(fill=tk.X, pady=2)
 
@@ -372,7 +428,7 @@ class PerfboardPlanner(tk.Tk):
         ).pack(anchor="w", pady=(8, 0))
 
         # --- Edit tab -----------------------------------------------------
-        ttk.Label(edit_tab, text="Clipboard", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(edit_tab, text="Clipboard / multi-select", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         clip_row_a = ttk.Frame(edit_tab)
         clip_row_a.pack(anchor="w", fill=tk.X, pady=(5, 0))
         ttk.Button(clip_row_a, text="Copy", command=self.copy_selected_component).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -381,6 +437,7 @@ class PerfboardPlanner(tk.Tk):
         clip_row_b.pack(anchor="w", fill=tk.X, pady=(4, 0))
         ttk.Button(clip_row_b, text="Paste", command=self.paste_component).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(clip_row_b, text="Duplicate", command=self.duplicate_selected_component).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        ttk.Button(edit_tab, text="Rotate selected component(s)", command=self.rotate_selected_components).pack(fill=tk.X, pady=(6, 0))
 
         ttk.Separator(edit_tab).pack(fill=tk.X, pady=10)
         ttk.Label(
@@ -391,7 +448,9 @@ class PerfboardPlanner(tk.Tk):
                 "Ctrl/Cmd+X = cut\n"
                 "Ctrl/Cmd+V = paste\n"
                 "Ctrl/Cmd+D = duplicate\n"
-                "Delete/Backspace = delete"
+                "R = rotate selected component(s) 90° clockwise\n"
+                "Shift/Ctrl/Cmd+click = add/remove from selection\n"
+                "Delete/Backspace = delete selected"
             ),
             justify=tk.LEFT,
             wraplength=270,
@@ -433,6 +492,27 @@ class PerfboardPlanner(tk.Tk):
             justify=tk.LEFT,
             wraplength=270,
         ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(view_tab, text="Component labels", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        label_row = ttk.Frame(view_tab)
+        label_row.pack(anchor="w", fill=tk.X, pady=(5, 0))
+        ttk.Checkbutton(
+            label_row,
+            text="Names",
+            variable=self.show_component_names,
+            command=self.redraw,
+            style="Toolbutton",
+            width=10,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Checkbutton(
+            label_row,
+            text="Pin names",
+            variable=self.show_component_pin_names,
+            command=self.redraw,
+            style="Toolbutton",
+            width=10,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
 
         # --- File tab -----------------------------------------------------
         ttk.Label(file_tab, text="File", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
@@ -607,6 +687,8 @@ class PerfboardPlanner(tk.Tk):
         self.canvas.bind("<Control-V>", self.paste_component)
         self.canvas.bind("<Control-d>", self.duplicate_selected_component)
         self.canvas.bind("<Control-D>", self.duplicate_selected_component)
+        self.canvas.bind("<Key-r>", self.rotate_selected_components)
+        self.canvas.bind("<Key-R>", self.rotate_selected_components)
         self.safe_bind(self.canvas, "<Command-c>", self.copy_selected_component)
         self.safe_bind(self.canvas, "<Command-C>", self.copy_selected_component)
         self.safe_bind(self.canvas, "<Command-x>", self.cut_selected_component)
@@ -627,6 +709,8 @@ class PerfboardPlanner(tk.Tk):
         self.bind("<Control-V>", self.paste_component)
         self.bind("<Control-d>", self.duplicate_selected_component)
         self.bind("<Control-D>", self.duplicate_selected_component)
+        self.bind("<Key-r>", self.rotate_selected_components)
+        self.bind("<Key-R>", self.rotate_selected_components)
         self.safe_bind(self, "<Command-c>", self.copy_selected_component)
         self.safe_bind(self, "<Command-C>", self.copy_selected_component)
         self.safe_bind(self, "<Command-x>", self.cut_selected_component)
@@ -644,9 +728,126 @@ class PerfboardPlanner(tk.Tk):
 
         self.drag_start_grid: Optional[Tuple[int, int]] = None
         self.drag_component_original: Optional[Tuple[int, int]] = None
+        self.drag_component_originals: Dict[int, Tuple[int, int]] = {}
+        self.drag_wire_originals: Dict[int, List[Tuple[int, int]]] = {}
         self.update_zoom_label()
         self.update_pin_count_label()
         self._update_mode_ui()
+
+    # ------------------------------------------------------------------
+    # Selection helpers
+    # ------------------------------------------------------------------
+    def normalize_selection(self):
+        valid: Set[Tuple[str, int]] = set()
+        for kind, index in list(getattr(self, "selected_items", set())):
+            if kind == "component" and 0 <= index < len(self.components) and self.components[index].side == self.current_side.get():
+                valid.add((kind, index))
+            elif kind == "wire" and 0 <= index < len(self.wires) and self.wires[index].side == self.current_side.get():
+                valid.add((kind, index))
+        self.selected_items = valid
+
+        if self.selected_kind == "component":
+            if self.selected_index is None or ("component", self.selected_index) not in valid:
+                self.selected_kind, self.selected_index = (next(iter(valid)) if valid else (None, None))
+        elif self.selected_kind == "wire":
+            if self.selected_index is None or ("wire", self.selected_index) not in valid:
+                self.selected_kind, self.selected_index = (next(iter(valid)) if valid else (None, None))
+        elif valid:
+            self.selected_kind, self.selected_index = next(iter(valid))
+
+    def selected_count_text(self) -> str:
+        self.normalize_selection()
+        comp_count = sum(1 for kind, _ in self.selected_items if kind == "component")
+        wire_count = sum(1 for kind, _ in self.selected_items if kind == "wire")
+        parts = []
+        if comp_count:
+            parts.append(f"{comp_count} component{'s' if comp_count != 1 else ''}")
+        if wire_count:
+            parts.append(f"{wire_count} wire{'s' if wire_count != 1 else ''}")
+        return " and ".join(parts) if parts else "nothing"
+
+    def is_item_selected(self, kind: str, index: int) -> bool:
+        return (kind, index) in getattr(self, "selected_items", set())
+
+    def clear_selection(self):
+        self.selected_items.clear()
+        self.selected_kind = None
+        self.selected_index = None
+
+    def set_single_selection(self, kind: Optional[str], index: Optional[int]):
+        self.clear_selection()
+        if kind is not None and index is not None:
+            self.selected_items.add((kind, index))
+            self.selected_kind = kind
+            self.selected_index = index
+
+    def toggle_selection(self, kind: str, index: int):
+        key = (kind, index)
+        if key in self.selected_items:
+            self.selected_items.remove(key)
+            if self.selected_kind == kind and self.selected_index == index:
+                if self.selected_items:
+                    self.selected_kind, self.selected_index = next(iter(self.selected_items))
+                else:
+                    self.selected_kind = None
+                    self.selected_index = None
+        else:
+            self.selected_items.add(key)
+            self.selected_kind = kind
+            self.selected_index = index
+
+    def selection_modifier_is_down(self, event) -> bool:
+        # Shift, Ctrl, Command/Meta. Tk's exact bit varies by platform, so the
+        # mask is intentionally permissive.
+        return bool(getattr(event, "state", 0) & (0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0080 | 0x0100))
+
+    def selected_keys(self) -> List[Tuple[str, int]]:
+        self.normalize_selection()
+        if not self.selected_items and self.selected_kind is not None and self.selected_index is not None:
+            self.selected_items.add((self.selected_kind, self.selected_index))
+            self.normalize_selection()
+        return sorted(self.selected_items, key=lambda item: (0 if item[0] == "component" else 1, item[1]))
+
+    def item_at(self, x: float, y: float, side: Optional[str] = None) -> Optional[Tuple[str, int]]:
+        side = self.current_side.get() if side is None else side
+        idx = self.component_index_at(x, y, side)
+        if idx is not None:
+            return ("component", idx)
+        idx = self.wire_index_at(x, y, side)
+        if idx is not None:
+            return ("wire", idx)
+        return None
+
+    def component_indices_in_selection(self) -> List[int]:
+        return [index for kind, index in self.selected_keys() if kind == "component" and 0 <= index < len(self.components)]
+
+    def wire_indices_in_selection(self) -> List[int]:
+        return [index for kind, index in self.selected_keys() if kind == "wire" and 0 <= index < len(self.wires)]
+
+    def selected_grid_bounds(self) -> Optional[Tuple[int, int, int, int]]:
+        rows: List[int] = []
+        cols: List[int] = []
+        for kind, index in self.selected_keys():
+            if kind == "component" and 0 <= index < len(self.components):
+                comp = self.components[index]
+                rows.extend([comp.row, comp.row + comp.height - 1])
+                cols.extend([comp.col, comp.col + comp.width - 1])
+                for pin in self.normalized_pins(comp.pins, comp.width, comp.height):
+                    rows.append(comp.row + pin.row)
+                    cols.append(comp.col + pin.col)
+            elif kind == "wire" and 0 <= index < len(self.wires):
+                for row, col in self.wires[index].points:
+                    rows.append(row)
+                    cols.append(col)
+        if not rows or not cols:
+            return None
+        return min(rows), min(cols), max(rows), max(cols)
+
+    def clamp_delta_for_bounds(self, bounds: Tuple[int, int, int, int], dr: int, dc: int) -> Tuple[int, int]:
+        min_r, min_c, max_r, max_c = bounds
+        dr = max(-min_r, min(self.rows - 1 - max_r, int(dr)))
+        dc = max(-min_c, min(self.cols - 1 - max_c, int(dc)))
+        return dr, dc
 
     def edit_selected_component(self, event=None):
         if event is not None and self.event_from_text_input(event):
@@ -664,6 +865,115 @@ class PerfboardPlanner(tk.Tk):
             self.status.set("Select a wire first, then double-click it or use Edit selected wire.")
             return "break"
         self.open_wire_editor(self.selected_index)
+        return "break"
+
+    def edit_selected_items(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        keys = self.selected_keys()
+        if not keys:
+            self.status.set("Select one or more items first.")
+            return "break"
+        comp_indices = self.component_indices_in_selection()
+        wire_indices = self.wire_indices_in_selection()
+
+        win = tk.Toplevel(self)
+        win.title("Edit selected items")
+        win.transient(self)
+        win.resizable(False, False)
+
+        side_var = tk.StringVar(value="keep")
+        apply_comp_color = tk.BooleanVar(value=False)
+        comp_color_var = tk.StringVar(value=self.current_color.get())
+        apply_wire_color = tk.BooleanVar(value=False)
+        wire_color_var = tk.StringVar(value=self.current_wire_color.get())
+        apply_angle = tk.BooleanVar(value=False)
+        angle_var = tk.IntVar(value=self.current_component_rotation.get())
+
+        body = ttk.Frame(win, padding=10)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text=f"Selected: {self.selected_count_text()}", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+
+        ttk.Label(body, text="Side").grid(row=1, column=0, sticky="w", pady=(10, 2))
+        side_row = ttk.Frame(body)
+        side_row.grid(row=1, column=1, columnspan=2, sticky="w", pady=(10, 2))
+        for label, value in [("Keep", "keep"), ("Front", "front"), ("Back", "back")]:
+            ttk.Radiobutton(side_row, text=label, variable=side_var, value=value).pack(side=tk.LEFT, padx=(0, 10))
+
+        row = 2
+        if comp_indices:
+            ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
+            row += 1
+            ttk.Label(body, text="Components", font=("TkDefaultFont", 10, "bold")).grid(row=row, column=0, columnspan=3, sticky="w")
+            row += 1
+            ttk.Checkbutton(body, text="Set color", variable=apply_comp_color).grid(row=row, column=0, sticky="w", pady=2)
+            comp_preview = tk.Label(body, textvariable=comp_color_var, bg=comp_color_var.get(), fg="#111111", width=12, relief=tk.SUNKEN)
+            comp_preview.grid(row=row, column=1, sticky="w", pady=2)
+            def choose_comp_color():
+                color = colorchooser.askcolor(color=comp_color_var.get(), title="Choose component color", parent=win)
+                if color and color[1]:
+                    comp_color_var.set(color[1])
+                    comp_preview.configure(bg=color[1])
+                    apply_comp_color.set(True)
+            ttk.Button(body, text="Choose…", command=choose_comp_color).grid(row=row, column=2, sticky="ew", padx=(6, 0), pady=2)
+            row += 1
+            ttk.Checkbutton(body, text="Set body angle", variable=apply_angle).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Combobox(body, textvariable=angle_var, values=[0, 45, 90, 135, 180, 225, 270, 315], state="readonly", width=8).grid(row=row, column=1, sticky="w", pady=2)
+            row += 1
+            ttk.Button(body, text="Rotate selected 90° clockwise", command=lambda: (self.rotate_selected_components(), win.destroy())).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+            row += 1
+
+        if wire_indices:
+            ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
+            row += 1
+            ttk.Label(body, text="Wires", font=("TkDefaultFont", 10, "bold")).grid(row=row, column=0, columnspan=3, sticky="w")
+            row += 1
+            ttk.Checkbutton(body, text="Set color", variable=apply_wire_color).grid(row=row, column=0, sticky="w", pady=2)
+            wire_preview = tk.Label(body, textvariable=wire_color_var, bg=wire_color_var.get(), fg="#111111", width=12, relief=tk.SUNKEN)
+            wire_preview.grid(row=row, column=1, sticky="w", pady=2)
+            def choose_wire_color_bulk():
+                color = colorchooser.askcolor(color=wire_color_var.get(), title="Choose wire color", parent=win)
+                if color and color[1]:
+                    wire_color_var.set(color[1])
+                    wire_preview.configure(bg=color[1])
+                    apply_wire_color.set(True)
+            ttk.Button(body, text="Choose…", command=choose_wire_color_bulk).grid(row=row, column=2, sticky="ew", padx=(6, 0), pady=2)
+            row += 1
+
+        def apply_changes():
+            side_choice = side_var.get()
+            for idx in comp_indices:
+                if not (0 <= idx < len(self.components)):
+                    continue
+                comp = self.components[idx]
+                if side_choice in {"front", "back"}:
+                    comp.side = side_choice
+                if apply_comp_color.get():
+                    comp.color = comp_color_var.get() or "#ffcc66"
+                if apply_angle.get():
+                    comp.rotation = self.normalized_angle(angle_var.get())
+            for idx in wire_indices:
+                if not (0 <= idx < len(self.wires)):
+                    continue
+                wire = self.wires[idx]
+                if side_choice in {"front", "back"}:
+                    wire.side = side_choice
+                if apply_wire_color.get():
+                    wire.color = wire_color_var.get() or "#d00000"
+            if side_choice in {"front", "back"}:
+                self.current_side.set(side_choice)
+                self.normalize_selection()
+            self.status.set(f"Updated {len(comp_indices) + len(wire_indices)} selected item{'s' if len(comp_indices) + len(wire_indices) != 1 else ''}.")
+            win.destroy()
+            self.redraw()
+
+        bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
+        bottom.pack(fill=tk.X)
+        ttk.Button(bottom, text="Apply", command=apply_changes).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(bottom, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+        win.bind("<Escape>", lambda event: win.destroy())
+        win.grab_set()
+        win.wait_window()
         return "break"
 
     def open_wire_editor(self, wire_index: int):
@@ -728,8 +1038,7 @@ class PerfboardPlanner(tk.Tk):
             edited.side = side_var.get() if side_var.get() in {"front", "back"} else self.current_side.get()
             edited.layer = "main"
             edited.lane = 0
-            self.selected_kind = "wire"
-            self.selected_index = wire_index
+            self.set_single_selection("wire", wire_index)
             self.current_side.set(edited.side)
             self.status.set("Updated wire.")
             win.destroy()
@@ -748,13 +1057,15 @@ class PerfboardPlanner(tk.Tk):
     def apply_current_wire_color_to_selected(self, event=None):
         if event is not None and self.event_from_text_input(event):
             return
-        if self.selected_kind != "wire" or self.selected_index is None or not (0 <= self.selected_index < len(self.wires)):
-            self.status.set("Select a wire first, then apply the current wire color.")
+        indices = self.wire_indices_in_selection()
+        if not indices:
+            self.status.set("Select one or more wires first, then apply the current wire color.")
             return "break"
-        wire = self.wires[self.selected_index]
-        wire.color = self.current_wire_color.get()
-        wire.layer = "main"
-        self.status.set("Applied current wire color to selected wire.")
+        for idx in indices:
+            if 0 <= idx < len(self.wires):
+                self.wires[idx].color = self.current_wire_color.get()
+                self.wires[idx].layer = "main"
+        self.status.set(f"Applied current wire color to {len(indices)} wire{'s' if len(indices) != 1 else ''}.")
         self.redraw()
         return "break"
 
@@ -843,6 +1154,7 @@ class PerfboardPlanner(tk.Tk):
         height_var = tk.IntVar(value=comp.height)
         color_var = tk.StringVar(value=comp.color)
         side_var = tk.StringVar(value=comp.side)
+        rotation_var = tk.IntVar(value=self.normalized_angle(getattr(comp, "rotation", 0)))
         edit_pins: List[ComponentPin] = self.copy_pins(comp.pins)
         edit_jumpers: List[ComponentJumper] = self.copy_jumpers(comp.jumpers)
         pin_summary = tk.StringVar(value="")
@@ -877,9 +1189,18 @@ class PerfboardPlanner(tk.Tk):
         ttk.Radiobutton(side_frame, text="Front", variable=side_var, value="front").pack(side=tk.LEFT)
         ttk.Radiobutton(side_frame, text="Back", variable=side_var, value="back").pack(side=tk.LEFT, padx=(12, 0))
 
-        ttk.Label(body, text="Color").grid(row=5, column=0, sticky="w", pady=2)
+        ttk.Label(body, text="Body angle").grid(row=5, column=0, sticky="w", pady=2)
+        ttk.Combobox(
+            body,
+            textvariable=rotation_var,
+            values=[0, 45, 90, 135, 180, 225, 270, 315],
+            state="readonly",
+            width=8,
+        ).grid(row=5, column=1, columnspan=2, sticky="w", pady=2)
+
+        ttk.Label(body, text="Color").grid(row=6, column=0, sticky="w", pady=2)
         color_preview = tk.Label(body, textvariable=color_var, bg=color_var.get(), fg="#111111", width=12, relief=tk.SUNKEN)
-        color_preview.grid(row=5, column=1, sticky="w", pady=2)
+        color_preview.grid(row=6, column=1, sticky="w", pady=2)
 
         def choose_color():
             color = colorchooser.askcolor(color=color_var.get(), title="Choose component color", parent=win)
@@ -887,11 +1208,11 @@ class PerfboardPlanner(tk.Tk):
                 color_var.set(color[1])
                 color_preview.configure(bg=color[1])
 
-        ttk.Button(body, text="Choose…", command=choose_color).grid(row=5, column=2, sticky="ew", padx=(6, 0), pady=2)
+        ttk.Button(body, text="Choose…", command=choose_color).grid(row=6, column=2, sticky="ew", padx=(6, 0), pady=2)
 
-        ttk.Separator(body).grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
-        ttk.Label(body, text="Attachment pins", font=("TkDefaultFont", 11, "bold")).grid(row=7, column=0, columnspan=3, sticky="w")
-        ttk.Label(body, textvariable=pin_summary).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Separator(body).grid(row=7, column=0, columnspan=3, sticky="ew", pady=10)
+        ttk.Label(body, text="Attachment pins", font=("TkDefaultFont", 11, "bold")).grid(row=8, column=0, columnspan=3, sticky="w")
+        ttk.Label(body, textvariable=pin_summary).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 2))
 
         def read_size() -> Tuple[int, int]:
             try:
@@ -922,7 +1243,7 @@ class PerfboardPlanner(tk.Tk):
 
             self.open_pin_editor(f"Pin layout: {name_var.get() or comp.name}", width, height, pins, apply_pins, jumpers=edit_jumpers)
 
-        ttk.Button(body, text="Edit pins…", command=edit_pins_action).grid(row=9, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        ttk.Button(body, text="Edit pins…", command=edit_pins_action).grid(row=10, column=0, columnspan=3, sticky="ew", pady=(2, 0))
 
         for variable in (width_var, height_var):
             variable.trace_add("write", update_pin_summary)
@@ -958,11 +1279,11 @@ class PerfboardPlanner(tk.Tk):
             edited.height = height
             edited.color = color_var.get() or "#ffcc66"
             edited.side = side
+            edited.rotation = self.normalized_angle(rotation_var.get())
             edited.pins = self.normalized_pins(edit_pins, width, height)
             edited.jumpers = self.normalized_jumpers(edit_jumpers, edited.pins)
 
-            self.selected_kind = "component"
-            self.selected_index = component_index
+            self.set_single_selection("component", component_index)
             self.current_side.set(side)
             self.status.set(f"Updated component {edited.name}.")
             win.destroy()
@@ -1310,16 +1631,14 @@ class PerfboardPlanner(tk.Tk):
 
     def _mode_changed(self):
         self.cancel_temp_wire()
-        self.selected_kind = None
-        self.selected_index = None
+        self.clear_selection()
         self._update_mode_ui()
         self.status.set(self._mode_style()["hint"])
         self.redraw()
 
     def _side_changed(self):
         self.cancel_temp_wire()
-        self.selected_kind = None
-        self.selected_index = None
+        self.clear_selection()
         self._update_mode_ui()
         self.status.set(f"Viewing {self.current_side_label()} side. New items are placed on this side.")
         self.redraw()
@@ -1647,6 +1966,41 @@ class PerfboardPlanner(tk.Tk):
                     tags=("hole", f"hole:{row}:{col}"),
                 )
 
+    def component_body_polygon(self, comp: Component, pad: Optional[float] = None) -> List[Tuple[float, float]]:
+        x1, y1 = self.grid_to_xy(comp.row, comp.col)
+        x2, y2 = self.grid_to_xy(comp.row + comp.height - 1, comp.col + comp.width - 1)
+        if pad is None:
+            pad = self.scaled_spacing() * 0.38
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        half_w = abs(x2 - x1) / 2 + pad
+        half_h = abs(y2 - y1) / 2 + pad
+        angle = math.radians(self.normalized_angle(getattr(comp, "rotation", 0)))
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        points = [(-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)]
+        return [(cx + px * cos_a - py * sin_a, cy + px * sin_a + py * cos_a) for px, py in points]
+
+    @staticmethod
+    def flatten_points(points: List[Tuple[float, float]]) -> List[float]:
+        return [value for point in points for value in point]
+
+    @staticmethod
+    def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
+        inside = False
+        n = len(polygon)
+        if n < 3:
+            return False
+        j = n - 1
+        for i in range(n):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+            intersects = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-9) + xi)
+            if intersects:
+                inside = not inside
+            j = i
+        return inside
+
     def draw_components(self, side: Optional[str] = None, ghost: bool = False):
         for i, comp in enumerate(self.components):
             if side is not None and comp.side != side:
@@ -1654,32 +2008,34 @@ class PerfboardPlanner(tk.Tk):
             x1, y1 = self.grid_to_xy(comp.row, comp.col)
             x2, y2 = self.grid_to_xy(comp.row + comp.height - 1, comp.col + comp.width - 1)
             pad = self.scaled_spacing() * 0.38
-            selected = (not ghost) and self.selected_kind == "component" and self.selected_index == i
+            selected = (not ghost) and self.is_item_selected("component", i)
+            polygon = self.component_body_polygon(comp, pad)
+            flat_polygon = self.flatten_points(polygon)
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
 
             if ghost:
                 outline = self.blend_hex_color(comp.color, "#f2f2f2", 0.45)
                 ghost_fill = self.blend_hex_color(comp.color, "#117a35", 0.50)
                 width = max(1, round(1 * self.zoom))
                 tags = ("ghost_component", f"ghost_component:{i}")
-                self.canvas.create_rectangle(
-                    x1 - pad,
-                    y1 - pad,
-                    x2 + pad,
-                    y2 + pad,
+                self.canvas.create_polygon(
+                    *flat_polygon,
                     fill=ghost_fill,
                     outline=outline,
                     width=width,
                     stipple="gray50",
                     tags=tags,
                 )
-                self.canvas.create_text(
-                    (x1 + x2) / 2,
-                    (y1 + y2) / 2,
-                    text=f"{comp.name} ({self.side_label(comp.side)})",
-                    fill="#555555",
-                    font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"),
-                    tags=tags,
-                )
+                if self.show_component_names.get():
+                    self.canvas.create_text(
+                        cx,
+                        cy,
+                        text=f"{comp.name} ({self.side_label(comp.side)})",
+                        fill="#555555",
+                        font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"),
+                        tags=tags,
+                    )
                 if self.show_opposite_pins.get():
                     self.draw_component_jumpers(comp, ghost=True)
                     self.draw_component_pins(i, comp, selected=False, ghost=True)
@@ -1687,24 +2043,23 @@ class PerfboardPlanner(tk.Tk):
 
             outline = "#ffffff" if selected else "#111111"
             width = max(1, round(3 * self.zoom)) if selected else max(1, round(1 * self.zoom))
-            self.canvas.create_rectangle(
-                x1 - pad,
-                y1 - pad,
-                x2 + pad,
-                y2 + pad,
+            self.canvas.create_polygon(
+                *flat_polygon,
                 fill=comp.color,
                 outline=outline,
                 width=width,
                 tags=("component", f"component:{i}"),
             )
-            self.canvas.create_text(
-                (x1 + x2) / 2,
-                (y1 + y2) / 2,
-                text=comp.name,
-                fill="#111111",
-                font=("TkDefaultFont", max(6, round(10 * self.zoom)), "bold"),
-                tags=("component", f"component:{i}"),
-            )
+            if self.show_component_names.get():
+                angle_text = f"  {self.normalized_angle(getattr(comp, 'rotation', 0))}°" if self.normalized_angle(getattr(comp, 'rotation', 0)) else ""
+                self.canvas.create_text(
+                    cx,
+                    cy,
+                    text=f"{comp.name}{angle_text}" if angle_text and self.zoom >= 1.25 else comp.name,
+                    fill="#111111",
+                    font=("TkDefaultFont", max(6, round(10 * self.zoom)), "bold"),
+                    tags=("component", f"component:{i}"),
+                )
             self.draw_component_jumpers(comp, ghost=False)
             self.draw_component_pins(i, comp, selected, ghost=False)
 
@@ -1776,7 +2131,7 @@ class PerfboardPlanner(tk.Tk):
                     dash=(max(2, round(3 * self.zoom)), max(2, round(2 * self.zoom))),
                     tags=("ghost_pin", f"ghost_pin:{component_index}:{pin_index}"),
                 )
-                if self.zoom >= 1.35:
+                if self.show_component_pin_names.get() and self.zoom >= 1.35:
                     self.canvas.create_text(
                         x + 7 * self.zoom,
                         y - 8 * self.zoom,
@@ -1828,7 +2183,7 @@ class PerfboardPlanner(tk.Tk):
                     tags=pin_tags,
                 )
 
-            if selected or self.zoom >= 1.15:
+            if self.show_component_pin_names.get() and (selected or self.zoom >= 1.15):
                 text_fill = "#ffffff" if selected else "#111111"
                 if wire_colors:
                     # Small white backing keeps pin names readable when they sit
@@ -2298,7 +2653,7 @@ class PerfboardPlanner(tk.Tk):
         for i, wire in enumerate(self.wires):
             if side is not None and wire.side != side:
                 continue
-            selected = (not ghost) and self.selected_kind == "wire" and self.selected_index == i
+            selected = (not ghost) and self.is_item_selected("wire", i)
             width = max(1, round((4 if ghost else (7 if selected else 5)) * self.zoom))
             path = self.wire_visual_path_points(i, wire)
 
@@ -2417,11 +2772,15 @@ class PerfboardPlanner(tk.Tk):
             comp = self.components[i]
             if comp.side != side:
                 continue
-            x1, y1 = self.grid_to_xy(comp.row, comp.col)
-            x2, y2 = self.grid_to_xy(comp.row + comp.height - 1, comp.col + comp.width - 1)
-            pad = self.scaled_spacing() * 0.5
-            if min(x1, x2) - pad <= x <= max(x1, x2) + pad and min(y1, y2) - pad <= y <= max(y1, y2) + pad:
+            polygon = self.component_body_polygon(comp, self.scaled_spacing() * 0.50)
+            if self.point_in_polygon(x, y, polygon):
                 return i
+            # External pins may sit outside the body. Let a click near any pin
+            # still select the component.
+            for pin in self.normalized_pins(comp.pins, comp.width, comp.height):
+                px, py = self.grid_to_xy(comp.row + pin.row, comp.col + pin.col)
+                if ((x - px) ** 2 + (y - py) ** 2) ** 0.5 <= max(8, 9 * self.zoom):
+                    return i
         return None
 
     def wire_index_at(self, x: float, y: float, side: Optional[str] = None) -> Optional[int]:
@@ -2442,8 +2801,7 @@ class PerfboardPlanner(tk.Tk):
         cx, cy = self.canvas_event_xy(event)
         idx = self.component_index_at(cx, cy, self.current_side.get())
         if idx is not None:
-            self.selected_kind = "component"
-            self.selected_index = idx
+            self.set_single_selection("component", idx)
             self.drag_start_grid = None
             self.drag_component_original = None
             self.redraw()
@@ -2452,8 +2810,7 @@ class PerfboardPlanner(tk.Tk):
 
         wire_idx = self.wire_index_at(cx, cy, self.current_side.get())
         if wire_idx is not None:
-            self.selected_kind = "wire"
-            self.selected_index = wire_idx
+            self.set_single_selection("wire", wire_idx)
             self.drag_start_grid = None
             self.drag_component_original = None
             self.redraw()
@@ -2484,11 +2841,11 @@ class PerfboardPlanner(tk.Tk):
                 h,
                 self.current_color.get(),
                 side=self.current_side.get(),
+                rotation=self.normalized_angle(self.current_component_rotation.get()),
                 pins=self.copy_pins(pins),
                 jumpers=self.normalized_jumpers(self.component_jumper_template, pins),
             ))
-            self.selected_kind = "component"
-            self.selected_index = len(self.components) - 1
+            self.set_single_selection("component", len(self.components) - 1)
             self.status.set("Component added.")
             self.redraw()
             return
@@ -2527,40 +2884,101 @@ class PerfboardPlanner(tk.Tk):
             return
 
         if mode == "select":
-            self.select_at(cx, cy)
-            if self.selected_kind == "component" and self.selected_index is not None and grid is not None:
-                comp = self.components[self.selected_index]
-                self.drag_start_grid = grid
-                self.drag_component_original = (comp.row, comp.col)
+            item = self.item_at(cx, cy, self.current_side.get())
+            modifier = self.selection_modifier_is_down(event)
+            if item is None:
+                if not modifier:
+                    self.clear_selection()
+            elif modifier:
+                self.toggle_selection(*item)
             else:
-                self.drag_start_grid = None
-                self.drag_component_original = None
+                # Clicking an already-selected item keeps the multi-selection
+                # together so the group can be dragged, copied, or edited.
+                if item in self.selected_items:
+                    self.selected_kind, self.selected_index = item
+                else:
+                    self.set_single_selection(*item)
+
+            self.drag_start_grid = grid if item is not None and grid is not None else None
+            self.drag_component_original = None
+            self.drag_component_originals = {}
+            self.drag_wire_originals = {}
+            if self.drag_start_grid is not None and item is not None:
+                keys = self.selected_keys()
+                if item not in keys:
+                    keys = [item]
+                for kind, index in keys:
+                    if kind == "component" and 0 <= index < len(self.components):
+                        comp = self.components[index]
+                        self.drag_component_originals[index] = (comp.row, comp.col)
+                        if item == (kind, index):
+                            self.drag_component_original = (comp.row, comp.col)
+                    elif kind == "wire" and 0 <= index < len(self.wires):
+                        self.drag_wire_originals[index] = list(self.wires[index].points)
+
             self.redraw()
 
     def on_drag(self, event):
         if self.mode.get() != "select":
             return
-        if self.selected_kind != "component" or self.selected_index is None:
+        if self.drag_start_grid is None:
             return
-        if self.drag_start_grid is None or self.drag_component_original is None:
+        if not self.drag_component_originals and not getattr(self, "drag_wire_originals", {}):
             return
         cx, cy = self.canvas_event_xy(event)
         grid = self.xy_to_grid(cx, cy)
         if grid is None:
             return
         start_row, start_col = self.drag_start_grid
-        orig_row, orig_col = self.drag_component_original
         row, col = grid
-        comp = self.components[self.selected_index]
-        new_row = max(0, min(self.rows - comp.height, orig_row + row - start_row))
-        new_col = max(0, min(self.cols - comp.width, orig_col + col - start_col))
-        if (comp.row, comp.col) != (new_row, new_col):
-            comp.row, comp.col = new_row, new_col
+        dr = row - start_row
+        dc = col - start_col
+
+        # Clamp the whole selected group to the board where possible.
+        bounds = self.selected_grid_bounds()
+        if bounds is not None:
+            # Recreate bounds from original drag positions, not from already-moved items.
+            rows: List[int] = []
+            cols: List[int] = []
+            for index, (orig_row, orig_col) in self.drag_component_originals.items():
+                comp = self.components[index]
+                rows.extend([orig_row, orig_row + comp.height - 1])
+                cols.extend([orig_col, orig_col + comp.width - 1])
+                for pin in self.normalized_pins(comp.pins, comp.width, comp.height):
+                    rows.append(orig_row + pin.row)
+                    cols.append(orig_col + pin.col)
+            for pts in self.drag_wire_originals.values():
+                for pr, pc in pts:
+                    rows.append(pr)
+                    cols.append(pc)
+            if rows and cols:
+                dr, dc = self.clamp_delta_for_bounds((min(rows), min(cols), max(rows), max(cols)), dr, dc)
+
+        changed = False
+        for index, (orig_row, orig_col) in self.drag_component_originals.items():
+            if not (0 <= index < len(self.components)):
+                continue
+            comp = self.components[index]
+            new_row = orig_row + dr
+            new_col = orig_col + dc
+            if (comp.row, comp.col) != (new_row, new_col):
+                comp.row, comp.col = new_row, new_col
+                changed = True
+        for index, pts in self.drag_wire_originals.items():
+            if not (0 <= index < len(self.wires)):
+                continue
+            new_pts = [(r + dr, c + dc) for r, c in pts]
+            if self.wires[index].points != new_pts:
+                self.wires[index].points = new_pts
+                changed = True
+        if changed:
             self.redraw()
 
     def on_release(self, event):
         self.drag_start_grid = None
         self.drag_component_original = None
+        self.drag_component_originals = {}
+        self.drag_wire_originals = {}
 
     def on_motion(self, event):
         cx, cy = self.canvas_event_xy(event)
@@ -2593,34 +3011,11 @@ class PerfboardPlanner(tk.Tk):
         return ", ".join(hits)
 
     def select_at(self, x: int, y: int):
-        self.selected_kind = None
-        self.selected_index = None
-
-        # Topmost component first.
-        for i in range(len(self.components) - 1, -1, -1):
-            comp = self.components[i]
-            if comp.side != self.current_side.get():
-                continue
-            x1, y1 = self.grid_to_xy(comp.row, comp.col)
-            x2, y2 = self.grid_to_xy(comp.row + comp.height - 1, comp.col + comp.width - 1)
-            pad = self.scaled_spacing() * 0.5
-            if min(x1, x2) - pad <= x <= max(x1, x2) + pad and min(y1, y2) - pad <= y <= max(y1, y2) + pad:
-                self.selected_kind = "component"
-                self.selected_index = i
-                return
-
-        # Wires next. Select if click is close to any segment.
-        for i in range(len(self.wires) - 1, -1, -1):
-            wire = self.wires[i]
-            if wire.side != self.current_side.get():
-                continue
-            pts = [self.grid_to_xy(row, col) for row, col in wire.points]
-            visual_pts = self.offset_polyline_points(pts, self.wire_lane_offset(wire))
-            for a, b in zip(visual_pts, visual_pts[1:]):
-                if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= max(6, 8 * self.zoom):
-                    self.selected_kind = "wire"
-                    self.selected_index = i
-                    return
+        item = self.item_at(x, y, self.current_side.get())
+        if item is None:
+            self.clear_selection()
+        else:
+            self.set_single_selection(*item)
 
     @staticmethod
     def distance_to_segment(px, py, ax, ay, bx, by) -> float:
@@ -2654,8 +3049,7 @@ class PerfboardPlanner(tk.Tk):
             name = simpledialog.askstring("Wire name", "Wire name:", initialvalue="") or ""
         self.wires.append(Wire(name, list(self.temp_wire_points), self.current_wire_color.get(), side=self.current_side.get(), lane=0))
         self.temp_wire_points.clear()
-        self.selected_kind = "wire"
-        self.selected_index = len(self.wires) - 1
+        self.set_single_selection("wire", len(self.wires) - 1)
         self.redraw()
 
     def cancel_temp_wire(self, event=None):
@@ -2667,53 +3061,78 @@ class PerfboardPlanner(tk.Tk):
     def delete_selected(self, event=None):
         if event is not None and self.event_from_text_input(event):
             return
-        if self.selected_kind == "component" and self.selected_index is not None:
-            del self.components[self.selected_index]
-            self.status.set("Component deleted.")
-        elif self.selected_kind == "wire" and self.selected_index is not None:
-            del self.wires[self.selected_index]
-            self.status.set("Wire deleted.")
-        self.selected_kind = None
-        self.selected_index = None
+        keys = self.selected_keys()
+        if not keys:
+            self.status.set("Nothing selected.")
+            return "break"
+        comp_indices = sorted([i for kind, i in keys if kind == "component"], reverse=True)
+        wire_indices = sorted([i for kind, i in keys if kind == "wire"], reverse=True)
+        for i in wire_indices:
+            if 0 <= i < len(self.wires):
+                del self.wires[i]
+        for i in comp_indices:
+            if 0 <= i < len(self.components):
+                del self.components[i]
+        total = len(comp_indices) + len(wire_indices)
+        self.clear_selection()
+        self.status.set(f"Deleted {total} selected item{'s' if total != 1 else ''}.")
         self.redraw()
         return "break"
 
     def selected_component(self) -> Optional[Component]:
-        if self.selected_kind != "component" or self.selected_index is None:
+        comp_keys = self.component_indices_in_selection()
+        if len(comp_keys) != 1:
             return None
-        if not (0 <= self.selected_index < len(self.components)):
+        idx = comp_keys[0]
+        if not (0 <= idx < len(self.components)):
             return None
-        comp = self.components[self.selected_index]
+        comp = self.components[idx]
         if comp.side != self.current_side.get():
             return None
         return comp
 
+    def build_clipboard_from_selection(self) -> bool:
+        keys = self.selected_keys()
+        if not keys:
+            return False
+        bounds = self.selected_grid_bounds()
+        if bounds is None:
+            return False
+        min_r, min_c, max_r, max_c = bounds
+        items: List[Dict[str, Any]] = []
+        for kind, index in keys:
+            if kind == "component" and 0 <= index < len(self.components):
+                items.append({"kind": "component", "data": self.clone_component(self.components[index])})
+            elif kind == "wire" and 0 <= index < len(self.wires):
+                items.append({"kind": "wire", "data": self.clone_wire(self.wires[index])})
+        if not items:
+            return False
+        self.clipboard_items = items
+        self.clipboard_bounds = (min_r, min_c, max_r, max_c)
+        self.clipboard_paste_count = 0
+        # Compatibility: keep the old single-component clipboard populated when possible.
+        if len(items) == 1 and items[0]["kind"] == "component":
+            self.component_clipboard = self.clone_component(items[0]["data"])
+        return True
+
     def copy_selected_component(self, event=None):
         if event is not None and self.event_from_text_input(event):
             return
-        comp = self.selected_component()
-        if comp is None:
-            self.status.set("Select a component first, then copy.")
+        if not self.build_clipboard_from_selection():
+            self.status.set("Select one or more components/wires first, then copy.")
             return "break"
-        self.component_clipboard = self.clone_component(comp)
-        self.component_paste_count = 0
-        self.status.set(f"Copied component {comp.name}.")
+        self.status.set(f"Copied {self.selected_count_text()}.")
         return "break"
 
     def cut_selected_component(self, event=None):
         if event is not None and self.event_from_text_input(event):
             return
-        comp = self.selected_component()
-        if comp is None:
-            self.status.set("Select a component first, then cut.")
+        if not self.build_clipboard_from_selection():
+            self.status.set("Select one or more components/wires first, then cut.")
             return "break"
-        self.component_clipboard = self.clone_component(comp)
-        self.component_paste_count = 0
-        del self.components[self.selected_index]
-        self.selected_kind = None
-        self.selected_index = None
-        self.status.set(f"Cut component {comp.name}.")
-        self.redraw()
+        text = self.selected_count_text()
+        self.delete_selected()
+        self.status.set(f"Cut {text}.")
         return "break"
 
     def clamp_component_position(self, comp: Component, row: int, col: int) -> Tuple[int, int]:
@@ -2724,58 +3143,99 @@ class PerfboardPlanner(tk.Tk):
     def paste_component(self, event=None):
         if event is not None and self.event_from_text_input(event):
             return
-        if self.component_clipboard is None:
-            self.status.set("No copied component to paste.")
+        # Upgrade old single-component clipboard if needed.
+        if not self.clipboard_items and self.component_clipboard is not None:
+            self.clipboard_items = [{"kind": "component", "data": self.clone_component(self.component_clipboard)}]
+            c = self.component_clipboard
+            self.clipboard_bounds = (c.row, c.col, c.row + c.height - 1, c.col + c.width - 1)
+        if not self.clipboard_items or self.clipboard_bounds is None:
+            self.status.set("No copied item to paste.")
             return "break"
 
-        source = self.component_clipboard
-        self.component_paste_count += 1
-        offset = self.component_paste_count
-        row, col = self.clamp_component_position(source, source.row + offset, source.col + offset)
-        pasted = self.clone_component(source, row=row, col=col, side=self.current_side.get())
-        self.components.append(pasted)
-        self.selected_kind = "component"
-        self.selected_index = len(self.components) - 1
+        self.clipboard_paste_count += 1
+        min_r, min_c, max_r, max_c = self.clipboard_bounds
+        # Offset every paste one hole down/right, clamped as a group.
+        dr, dc = self.clamp_delta_for_bounds((min_r, min_c, max_r, max_c), self.clipboard_paste_count, self.clipboard_paste_count)
+        new_selection: Set[Tuple[str, int]] = set()
+        for item in self.clipboard_items:
+            if item["kind"] == "component":
+                src: Component = item["data"]
+                row = src.row + dr
+                col = src.col + dc
+                row, col = self.clamp_component_position(src, row, col)
+                pasted = self.clone_component(src, row=row, col=col, side=self.current_side.get())
+                self.components.append(pasted)
+                new_selection.add(("component", len(self.components) - 1))
+            elif item["kind"] == "wire":
+                src: Wire = item["data"]
+                pts = [(r + dr, c + dc) for r, c in src.points]
+                # Keep the entire pasted wire inside the board.
+                pts = [(max(0, min(self.rows - 1, int(r))), max(0, min(self.cols - 1, int(c)))) for r, c in pts]
+                pasted = self.clone_wire(src, points=pts, side=self.current_side.get())
+                self.wires.append(pasted)
+                new_selection.add(("wire", len(self.wires) - 1))
+        self.selected_items = new_selection
+        if new_selection:
+            self.selected_kind, self.selected_index = next(iter(new_selection))
         self.mode.set("select")
-        self.status.set(f"Pasted component {pasted.name}.")
+        self.status.set(f"Pasted {len(new_selection)} item{'s' if len(new_selection) != 1 else ''}.")
         self.redraw()
         return "break"
 
     def duplicate_selected_component(self, event=None):
         if event is not None and self.event_from_text_input(event):
             return
-        comp = self.selected_component()
-        if comp is None:
-            self.status.set("Select a component first, then duplicate.")
+        if not self.build_clipboard_from_selection():
+            self.status.set("Select one or more components/wires first, then duplicate.")
             return "break"
+        self.clipboard_paste_count = 0
+        return self.paste_component()
 
-        row, col = self.clamp_component_position(comp, comp.row + 1, comp.col + 1)
-        duplicate = self.clone_component(comp, row=row, col=col)
-        self.components.append(duplicate)
-        self.selected_kind = "component"
-        self.selected_index = len(self.components) - 1
-        self.mode.set("select")
-        self.status.set(f"Duplicated component {duplicate.name}.")
+    def rotate_component_90_clockwise(self, comp: Component):
+        old_h = int(comp.height)
+        old_w = int(comp.width)
+        new_pins = []
+        for pin in self.normalized_pins(comp.pins, old_w, old_h):
+            nr, nc = self.rotate_point_90_clockwise(pin.row, pin.col, old_h)
+            new_pins.append(ComponentPin(pin.name, nr, nc))
+        comp.width, comp.height = old_h, old_w
+        comp.pins = self.normalized_pins(new_pins, comp.width, comp.height)
+        comp.jumpers = self.normalized_jumpers(comp.jumpers, comp.pins)
+        comp.row, comp.col = self.clamp_component_position(comp, comp.row, comp.col)
+
+    def rotate_selected_components(self, event=None):
+        if event is not None and self.event_from_text_input(event):
+            return
+        indices = self.component_indices_in_selection()
+        if not indices:
+            self.status.set("Select one or more components first, then rotate.")
+            return "break"
+        for idx in indices:
+            if 0 <= idx < len(self.components):
+                self.rotate_component_90_clockwise(self.components[idx])
+        self.status.set(f"Rotated {len(indices)} component{'s' if len(indices) != 1 else ''} 90° clockwise.")
         self.redraw()
         return "break"
 
     def move_selected_to_other_side(self):
         target_side = self.other_side()
-        if self.selected_kind == "component" and self.selected_index is not None and 0 <= self.selected_index < len(self.components):
-            self.components[self.selected_index].side = target_side
-            self.current_side.set(target_side)
-            self._update_mode_ui()
-            self.status.set(f"Moved component to {self.current_side_label()} side.")
-            self.redraw()
+        keys = self.selected_keys()
+        if not keys:
+            self.status.set("Select one or more components/wires first, then send them to the other side.")
             return
-        if self.selected_kind == "wire" and self.selected_index is not None and 0 <= self.selected_index < len(self.wires):
-            self.wires[self.selected_index].side = target_side
-            self.current_side.set(target_side)
-            self._update_mode_ui()
-            self.status.set(f"Moved wire to {self.current_side_label()} side.")
-            self.redraw()
-            return
-        self.status.set("Select a component or wire first, then send it to the other side.")
+        moved = 0
+        for kind, index in keys:
+            if kind == "component" and 0 <= index < len(self.components):
+                self.components[index].side = target_side
+                moved += 1
+            elif kind == "wire" and 0 <= index < len(self.wires):
+                self.wires[index].side = target_side
+                moved += 1
+        self.current_side.set(target_side)
+        self._update_mode_ui()
+        self.clear_selection()
+        self.status.set(f"Moved {moved} item{'s' if moved != 1 else ''} to {self.current_side_label()} side.")
+        self.redraw()
 
     def resize_board(self):
         rows = simpledialog.askinteger("Rows", "Number of rows:", initialvalue=self.rows, minvalue=5, maxvalue=100)
@@ -2792,8 +3252,7 @@ class PerfboardPlanner(tk.Tk):
         if messagebox.askyesno("Clear board", "Remove all components and wires?"):
             self.components.clear()
             self.wires.clear()
-            self.selected_kind = None
-            self.selected_index = None
+            self.clear_selection()
             self.redraw()
 
     def new_file(self):
@@ -2802,8 +3261,7 @@ class PerfboardPlanner(tk.Tk):
             self.wires.clear()
             self.rows = 30
             self.cols = 45
-            self.selected_kind = None
-            self.selected_index = None
+            self.clear_selection()
             self.redraw()
 
     def save_file(self):
@@ -2815,7 +3273,7 @@ class PerfboardPlanner(tk.Tk):
         if not path:
             return
         data = {
-            "version": 7,
+            "version": 8,
             "board": {"rows": self.rows, "cols": self.cols, "spacing": self.spacing},
             "components": [asdict(c) for c in self.components],
             "wires": [asdict(w) for w in self.wires],
@@ -2852,6 +3310,7 @@ class PerfboardPlanner(tk.Tk):
                     int(c.get("height", 1)),
                     c.get("color", "#ffcc66"),
                     side=c.get("side", "front"),
+                    rotation=self.normalized_angle(c.get("rotation", 0)),
                     pins=normalized_pins,
                     jumpers=self.normalized_jumpers(jumpers, normalized_pins),
                 ))
@@ -2863,8 +3322,7 @@ class PerfboardPlanner(tk.Tk):
                 layer="main",
                 lane=self.clamp_wire_lane(w.get("lane", 0)),
             ) for w in data.get("wires", [])]
-            self.selected_kind = None
-            self.selected_index = None
+            self.clear_selection()
             self.redraw()
         except Exception as exc:
             messagebox.showerror("Open failed", str(exc))
