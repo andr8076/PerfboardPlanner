@@ -248,8 +248,13 @@ class PerfboardPlanner(tk.Tk):
         edit_tab = ttk.Frame(self.sidebar_notebook, padding=8)
         view_tab = ttk.Frame(self.sidebar_notebook, padding=8)
         file_tab = ttk.Frame(self.sidebar_notebook, padding=8)
+        self.tool_tab = tool_tab
+        self.part_tab = part_tab
+        self.edit_tab = edit_tab
+        self.view_tab = view_tab
+        self.file_tab = file_tab
         self.sidebar_notebook.add(tool_tab, text="Tool")
-        self.sidebar_notebook.add(part_tab, text="Part")
+        # The Part tab is inserted automatically only while Part mode is active.
         self.sidebar_notebook.add(edit_tab, text="Edit")
         self.sidebar_notebook.add(view_tab, text="View")
         self.sidebar_notebook.add(file_tab, text="File")
@@ -362,7 +367,7 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(file_tab, text=help_text, justify=tk.LEFT, wraplength=270).pack(anchor="w", pady=4)
 
         quickbar = ttk.Frame(side_outer, padding=(8, 6))
-        quickbar.grid(row=1, column=0, sticky="ew")
+        quickbar.grid(row=3, column=0, sticky="ew")
         quickbar.columnconfigure(0, weight=1)
 
         ttk.Label(quickbar, text="Mode", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
@@ -417,9 +422,9 @@ class PerfboardPlanner(tk.Tk):
             width=7,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        ttk.Separator(side_outer).grid(row=2, column=0, sticky="ew")
         self.status = tk.StringVar(value="Ready")
-        ttk.Label(side_outer, textvariable=self.status, wraplength=315, padding=8).grid(row=3, column=0, sticky="ew")
+        ttk.Label(side_outer, textvariable=self.status, wraplength=315, padding=8).grid(row=1, column=0, sticky="ew")
+        ttk.Separator(side_outer).grid(row=2, column=0, sticky="ew")
 
         board_area = ttk.Frame(main_pane)
         main_pane.add(board_area, minsize=380)
@@ -753,10 +758,57 @@ class PerfboardPlanner(tk.Tk):
     def side_label(side: str) -> str:
         return "Front" if side == "front" else "Back"
 
+    @staticmethod
+    def _parse_hex_color(color: str) -> Tuple[int, int, int]:
+        color = (color or "#000000").strip()
+        if color.startswith("#"):
+            color = color[1:]
+        if len(color) == 3:
+            color = "".join(ch * 2 for ch in color)
+        if len(color) != 6:
+            return 0, 0, 0
+        try:
+            return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+        except ValueError:
+            return 0, 0, 0
+
+    @classmethod
+    def blend_hex_color(cls, foreground: str, background: str = "#117a35", opacity: float = 0.5) -> str:
+        # Tk canvas items do not support true alpha transparency. This blends
+        # the ghost color toward the board color, and the stipple pattern below
+        # lets the active side still show through visually.
+        opacity = max(0.0, min(1.0, float(opacity)))
+        fr, fg, fb = cls._parse_hex_color(foreground)
+        br, bg, bb = cls._parse_hex_color(background)
+        r = round(fr * opacity + br * (1.0 - opacity))
+        g = round(fg * opacity + bg * (1.0 - opacity))
+        b = round(fb * opacity + bb * (1.0 - opacity))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def update_part_tab_visibility(self):
+        if not hasattr(self, "sidebar_notebook") or not hasattr(self, "part_tab"):
+            return
+        tabs = self.sidebar_notebook.tabs()
+        part_tab_id = str(self.part_tab)
+        part_mode_active = self.mode.get() == "component"
+
+        if part_mode_active and part_tab_id not in tabs:
+            self.sidebar_notebook.insert(1, self.part_tab, text="Part")
+        elif not part_mode_active and part_tab_id in tabs:
+            was_selected = self.sidebar_notebook.select() == part_tab_id
+            self.sidebar_notebook.forget(self.part_tab)
+            if was_selected and hasattr(self, "tool_tab"):
+                self.sidebar_notebook.select(self.tool_tab)
+
+        if part_mode_active:
+            self.sidebar_notebook.select(self.part_tab)
+
     def _mode_style(self) -> Dict[str, str]:
         return self.mode_styles.get(self.mode.get(), self.mode_styles["select"])
 
     def _update_mode_ui(self):
+        if hasattr(self, "sidebar_notebook"):
+            self.update_part_tab_visibility()
         if not hasattr(self, "mode_banner"):
             return
         style = self._mode_style()
@@ -993,7 +1045,8 @@ class PerfboardPlanner(tk.Tk):
             selected = (not ghost) and self.selected_kind == "component" and self.selected_index == i
 
             if ghost:
-                outline = "#555555"
+                outline = self.blend_hex_color(comp.color, "#f2f2f2", 0.45)
+                ghost_fill = self.blend_hex_color(comp.color, "#117a35", 0.50)
                 width = max(1, round(1 * self.zoom))
                 tags = ("ghost_component", f"ghost_component:{i}")
                 self.canvas.create_rectangle(
@@ -1001,7 +1054,7 @@ class PerfboardPlanner(tk.Tk):
                     y1 - pad,
                     x2 + pad,
                     y2 + pad,
-                    fill=comp.color,
+                    fill=ghost_fill,
                     outline=outline,
                     width=width,
                     stipple="gray50",
