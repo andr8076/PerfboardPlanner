@@ -106,7 +106,7 @@ class PerfboardPlanner(tk.Tk):
             "wire": {
                 "label": "DRAW WIRE",
                 "color": "#b00020",
-                "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire. Use wire lane to draw parallel wires beside each other.",
+                "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire. Overlapping wires are separated automatically; crossings get markers so you can tell jump-overs from real junctions.",
             },
             "label": {
                 "label": "TEXT LABEL",
@@ -345,28 +345,24 @@ class PerfboardPlanner(tk.Tk):
         # --- Wire tab -----------------------------------------------------
         ttk.Label(wire_tab, text="New wires", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         ttk.Button(wire_tab, text="Wire color", command=self.choose_wire_color).pack(fill=tk.X, pady=(5, 2))
-
-        lane_row = ttk.Frame(wire_tab)
-        lane_row.pack(fill=tk.X, pady=(5, 2))
-        ttk.Label(lane_row, text="Lane").pack(side=tk.LEFT)
-        ttk.Spinbox(lane_row, from_=-4, to=4, textvariable=self.current_wire_lane, width=5).pack(side=tk.LEFT, padx=(6, 0))
-
         ttk.Label(
             wire_tab,
-            text="Lane 0 draws on the hole centerline. Positive/negative lanes offset the wire sideways so parallel wires do not sit directly on top of each other.",
+            text=(
+                "Overlapping wire runs are separated automatically when drawn. "
+                "Crossings are marked: a solid dot means a real shared junction; "
+                "a small bridge means the wires pass over/under each other without connecting."
+            ),
             justify=tk.LEFT,
             wraplength=270,
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(anchor="w", pady=(8, 0))
 
         ttk.Separator(wire_tab).pack(fill=tk.X, pady=10)
         ttk.Label(wire_tab, text="Selected wire", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         ttk.Button(wire_tab, text="Edit selected wire…", command=self.edit_selected_wire).pack(fill=tk.X, pady=(5, 2))
         ttk.Button(wire_tab, text="Apply current color", command=self.apply_current_wire_color_to_selected).pack(fill=tk.X, pady=2)
-        ttk.Button(wire_tab, text="Apply current lane", command=self.apply_current_wire_lane_to_selected).pack(fill=tk.X, pady=2)
-        ttk.Button(wire_tab, text="Auto-stagger overlaps", command=self.auto_stagger_overlapping_wires).pack(fill=tk.X, pady=2)
         ttk.Label(
             wire_tab,
-            text="Tip: double-click a wire in Select mode to edit its name, color, side, and lane.",
+            text="Tip: double-click a wire in Select mode to edit its name, side, and color.",
             justify=tk.LEFT,
             wraplength=270,
         ).pack(anchor="w", pady=(8, 0))
@@ -457,7 +453,7 @@ class PerfboardPlanner(tk.Tk):
             "Wire mode:\n"
             "click start, click end = add wire\n"
             "Shift+click = add bend point\n"
-            "wire lane = draw beside another wire\n"
+            "overlaps are separated automatically\n"
             "right-click / Enter = finish wire\n"
             "Esc = cancel wire"
         )
@@ -680,7 +676,6 @@ class PerfboardPlanner(tk.Tk):
         name_var = tk.StringVar(value=wire.name)
         color_var = tk.StringVar(value=wire.color)
         side_var = tk.StringVar(value=wire.side)
-        lane_var = tk.IntVar(value=self.wire_lane_value(wire))
 
         body = ttk.Frame(win, padding=10)
         body.pack(fill=tk.BOTH, expand=True)
@@ -707,15 +702,16 @@ class PerfboardPlanner(tk.Tk):
 
         ttk.Button(body, text="Choose…", command=choose_color).grid(row=3, column=2, sticky="ew", padx=(6, 0), pady=2)
 
-        ttk.Label(body, text="Lane").grid(row=4, column=0, sticky="w", pady=2)
-        lane_frame = ttk.Frame(body)
-        lane_frame.grid(row=4, column=1, columnspan=2, sticky="w", pady=2)
-        ttk.Spinbox(lane_frame, from_=-4, to=4, textvariable=lane_var, width=6).pack(side=tk.LEFT)
-        ttk.Label(lane_frame, text="  0 = centered, +/- = beside it").pack(side=tk.LEFT)
-
         points_text = " → ".join(f"R{row + 1}C{col + 1}" for row, col in wire.points)
-        ttk.Label(body, text="Points").grid(row=5, column=0, sticky="nw", pady=(8, 2))
-        ttk.Label(body, text=points_text or "No points", wraplength=280, justify=tk.LEFT).grid(row=5, column=1, columnspan=2, sticky="w", pady=(8, 2))
+        ttk.Label(body, text="Points").grid(row=4, column=0, sticky="nw", pady=(8, 2))
+        ttk.Label(body, text=points_text or "No points", wraplength=280, justify=tk.LEFT).grid(row=4, column=1, columnspan=2, sticky="w", pady=(8, 2))
+
+        ttk.Label(
+            body,
+            text="Overlapping runs and crossing markers are handled automatically on the board view.",
+            wraplength=280,
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 2))
 
         def apply_changes():
             if not (0 <= wire_index < len(self.wires)):
@@ -727,7 +723,7 @@ class PerfboardPlanner(tk.Tk):
             edited.color = color_var.get() or "#d00000"
             edited.side = side_var.get() if side_var.get() in {"front", "back"} else self.current_side.get()
             edited.layer = "main"
-            edited.lane = self.clamp_wire_lane(lane_var.get())
+            edited.lane = 0
             self.selected_kind = "wire"
             self.selected_index = wire_index
             self.current_side.set(edited.side)
@@ -1594,6 +1590,7 @@ class PerfboardPlanner(tk.Tk):
     def redraw(self):
         self._update_mode_ui()
         self.canvas.delete("all")
+        self.recompute_auto_wire_spacing()
         self.draw_board()
 
         # Draw the non-active side first as a ghost layer. It is visible but not
@@ -1608,6 +1605,7 @@ class PerfboardPlanner(tk.Tk):
 
         active = self.current_side.get()
         self.draw_wires(side=active, ghost=False)
+        self.draw_wire_connection_markers(side=active)
         self.draw_components(side=active, ghost=False)
         self.draw_temp_wire()
         bbox = self.canvas.bbox("all")
@@ -1866,6 +1864,173 @@ class PerfboardPlanner(tk.Tk):
             result.append((x + nx * offset, y + ny * offset))
         return result
 
+    def recompute_auto_wire_spacing(self):
+        """Automatically separate same-side wires that share the same board run.
+
+        The saved connection points stay on the actual holes. The lane value is
+        now only an internal display offset, recalculated from the current
+        layout, so the user does not have to manage lanes manually.
+        """
+        for wire in self.wires:
+            wire.lane = 0
+
+        for side in ("front", "back"):
+            indexed = [(i, self.wires[i]) for i in range(len(self.wires)) if self.wires[i].side == side]
+            if len(indexed) < 2:
+                continue
+
+            segment_sets = {i: self.wire_unit_segments(wire) for i, wire in indexed}
+            conflicts = {i: set() for i, _ in indexed}
+            for pos, (i, _) in enumerate(indexed):
+                for j, _ in indexed[pos + 1:]:
+                    if segment_sets[i] and segment_sets[i].intersection(segment_sets[j]):
+                        conflicts[i].add(j)
+                        conflicts[j].add(i)
+
+            active = {i: neighbours for i, neighbours in conflicts.items() if neighbours}
+            if not active:
+                continue
+
+            # Keep the most important wire centered when possible, then push
+            # other conflicting wires to alternating sides. This is automatic,
+            # but it still uses the old lane field internally for compatibility.
+            lane_choices = [0, 1, -1, 2, -2, 3, -3, 4, -4]
+            assigned: Dict[int, int] = {}
+            for i in sorted(active, key=lambda idx: len(active[idx]), reverse=True):
+                used = {assigned[j] for j in active[i] if j in assigned}
+                for lane in lane_choices:
+                    if lane not in used:
+                        assigned[i] = lane
+                        break
+                else:
+                    assigned[i] = 4
+
+            for i, lane in assigned.items():
+                self.wires[i].lane = lane
+
+    def wire_visual_segments(self, wire: Wire) -> List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[int, int], Tuple[int, int]]]:
+        points_xy = [self.grid_to_xy(row, col) for row, col in wire.points]
+        visual_xy = self.offset_polyline_points(points_xy, self.wire_lane_offset(wire))
+        result = []
+        for a_xy, b_xy, a_grid, b_grid in zip(visual_xy, visual_xy[1:], wire.points, wire.points[1:]):
+            result.append((a_xy, b_xy, (int(a_grid[0]), int(a_grid[1])), (int(b_grid[0]), int(b_grid[1]))))
+        return result
+
+    @staticmethod
+    def segment_intersection_xy(a: Tuple[float, float], b: Tuple[float, float], c: Tuple[float, float], d: Tuple[float, float]):
+        ax, ay = a
+        bx, by = b
+        cx, cy = c
+        dx, dy = d
+        den = (ax - bx) * (cy - dy) - (ay - by) * (cx - dx)
+        if abs(den) < 0.000001:
+            return None
+        t = ((ax - cx) * (cy - dy) - (ay - cy) * (cx - dx)) / den
+        u = ((ax - cx) * (ay - by) - (ay - cy) * (ax - bx)) / den
+        eps = 0.000001
+        if -eps <= t <= 1.0 + eps and -eps <= u <= 1.0 + eps:
+            x = ax + t * (bx - ax)
+            y = ay + t * (by - ay)
+            return x, y, t, u
+        return None
+
+    def explicit_wire_junctions(self, side: str) -> Dict[Tuple[int, int], List[int]]:
+        holes: Dict[Tuple[int, int], List[int]] = {}
+        for i, wire in enumerate(self.wires):
+            if wire.side != side:
+                continue
+            for point in set((int(row), int(col)) for row, col in wire.points):
+                holes.setdefault(point, []).append(i)
+        return {point: indices for point, indices in holes.items() if len(indices) > 1}
+
+    def draw_wire_connection_markers(self, side: str):
+        # Solid dots mean a true shared hole/junction. Bridge symbols mean a
+        # visual crossing only, with no electrical connection implied.
+        junctions = self.explicit_wire_junctions(side)
+        junction_xy = []
+        for point, indices in junctions.items():
+            x, y = self.grid_to_xy(*point)
+            junction_xy.append((x, y))
+            r = max(4, 6 * self.zoom)
+            self.canvas.create_oval(
+                x - r,
+                y - r,
+                x + r,
+                y + r,
+                fill="#111111",
+                outline="#ffffff",
+                width=max(1, round(2 * self.zoom)),
+                tags=("wire_junction",),
+            )
+
+        visible = [(i, self.wires[i]) for i in range(len(self.wires)) if self.wires[i].side == side]
+        if len(visible) < 2:
+            return
+
+        segments = {i: self.wire_visual_segments(wire) for i, wire in visible}
+        markers = []
+        seen = set()
+        skip_radius = max(3.0, 4.0 * self.zoom)
+        for pos, (i, wire_a) in enumerate(visible):
+            for j, wire_b in visible[pos + 1:]:
+                for seg_a in segments[i]:
+                    a1, a2, _, _ = seg_a
+                    for seg_b in segments[j]:
+                        b1, b2, _, _ = seg_b
+                        hit = self.segment_intersection_xy(a1, a2, b1, b2)
+                        if hit is None:
+                            continue
+                        x, y, t, u = hit
+                        if any(((x - jx) ** 2 + (y - jy) ** 2) ** 0.5 <= skip_radius for jx, jy in junction_xy):
+                            continue
+                        # Ignore pure end-to-end touches; those are either real
+                        # junctions above or simply adjacent wire endpoints.
+                        endpoint_touch = (t < 0.02 or t > 0.98 or u < 0.02 or u > 0.98)
+                        if endpoint_touch:
+                            continue
+                        key = (round(x, 1), round(y, 1), min(i, j), max(i, j))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        top_index, top_segment = (j, seg_b) if j > i else (i, seg_a)
+                        markers.append((x, y, self.wires[top_index], top_segment))
+
+        for x, y, top_wire, top_segment in markers:
+            self.draw_wire_bridge_marker(x, y, top_wire, top_segment)
+
+    def draw_wire_bridge_marker(self, x: float, y: float, wire: Wire, segment):
+        (ax, ay), (bx, by), _, _ = segment
+        horizontal = abs(bx - ax) >= abs(by - ay)
+        r = max(6, 9 * self.zoom)
+        cover = max(5, 8 * self.zoom)
+        board_green = "#117a35"
+        # Cover the straight crossing point, then redraw a small curved bridge
+        # in the top wire's color. That makes it visually different from a
+        # solder/junction dot.
+        self.canvas.create_oval(
+            x - cover,
+            y - cover,
+            x + cover,
+            y + cover,
+            fill=board_green,
+            outline="#e8e8e8",
+            width=max(1, round(1 * self.zoom)),
+            tags=("wire_bridge",),
+        )
+        start = 0 if horizontal else 90
+        self.canvas.create_arc(
+            x - r,
+            y - r,
+            x + r,
+            y + r,
+            start=start,
+            extent=180,
+            style=tk.ARC,
+            outline=wire.color,
+            width=max(2, round(5 * self.zoom)),
+            tags=("wire_bridge",),
+        )
+
     def draw_wires(self, side: Optional[str] = None, ghost: bool = False):
         for i, wire in enumerate(self.wires):
             if side is not None and wire.side != side:
@@ -1929,8 +2094,7 @@ class PerfboardPlanner(tk.Tk):
                     self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=wire.color, outline="", tags=("wire", f"wire:{i}"))
             if wire.name and len(visual_xy) >= 2 and not ghost:
                 lx, ly = visual_xy[len(visual_xy) // 2]
-                label = wire.name if lane == 0 else f"{wire.name}  L{lane}"
-                self.canvas.create_text(lx + 8 * self.zoom, ly - 10 * self.zoom, text=label, anchor="w", fill="#111111", font=("TkDefaultFont", max(6, round(9 * self.zoom))), tags=("wire", f"wire:{i}"))
+                self.canvas.create_text(lx + 8 * self.zoom, ly - 10 * self.zoom, text=wire.name, anchor="w", fill="#111111", font=("TkDefaultFont", max(6, round(9 * self.zoom))), tags=("wire", f"wire:{i}"))
 
     def draw_opposite_connection_points(self, side: str):
         # Draw a small ring on every opposite-side component pin, even when the
@@ -2221,7 +2385,7 @@ class PerfboardPlanner(tk.Tk):
         name = ""
         if ask_name:
             name = simpledialog.askstring("Wire name", "Wire name:", initialvalue="") or ""
-        self.wires.append(Wire(name, list(self.temp_wire_points), self.current_wire_color.get(), side=self.current_side.get(), lane=self.current_wire_lane_value()))
+        self.wires.append(Wire(name, list(self.temp_wire_points), self.current_wire_color.get(), side=self.current_side.get(), lane=0))
         self.temp_wire_points.clear()
         self.selected_kind = "wire"
         self.selected_index = len(self.wires) - 1
