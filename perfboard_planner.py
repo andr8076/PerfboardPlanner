@@ -1,8 +1,15 @@
 import json
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import List, Optional, Tuple, Dict, Any
+
+
+@dataclass
+class ComponentPin:
+    name: str
+    row: int
+    col: int
 
 
 @dataclass
@@ -13,6 +20,7 @@ class Component:
     width: int
     height: int
     color: str
+    pins: List[ComponentPin] = field(default_factory=list)
 
 
 @dataclass
@@ -48,6 +56,9 @@ class PerfboardPlanner(tk.Tk):
         self.current_name = tk.StringVar(value="Part")
         self.component_w = tk.IntVar(value=4)
         self.component_h = tk.IntVar(value=2)
+        self.component_pin_template: List[ComponentPin] = self.default_pins_for_size(4, 2)
+        self.component_w.trace_add("write", lambda *_: self.update_pin_count_label())
+        self.component_h.trace_add("write", lambda *_: self.update_pin_count_label())
 
         self.selected_kind: Optional[str] = None
         self.selected_index: Optional[int] = None
@@ -68,7 +79,7 @@ class PerfboardPlanner(tk.Tk):
             "wire": {
                 "label": "DRAW WIRE",
                 "color": "#b00020",
-                "hint": "Click a start hole, then click an end hole. Shift+click adds bend points. Right-click or Enter finishes the current wire.",
+                "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire.",
             },
             "label": {
                 "label": "TEXT LABEL",
@@ -79,6 +90,45 @@ class PerfboardPlanner(tk.Tk):
 
         self._build_ui()
         self.redraw()
+
+    @staticmethod
+    def default_pins_for_size(width: int, height: int) -> List[ComponentPin]:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        if width == 1 and height == 1:
+            return [ComponentPin("P1", 0, 0)]
+        return [ComponentPin("P1", 0, 0), ComponentPin("P2", height - 1, width - 1)]
+
+    @staticmethod
+    def copy_pins(pins: List[ComponentPin]) -> List[ComponentPin]:
+        return [ComponentPin(pin.name, int(pin.row), int(pin.col)) for pin in pins]
+
+    @staticmethod
+    def normalized_pins(pins: List[ComponentPin], width: int, height: int) -> List[ComponentPin]:
+        normalized: List[ComponentPin] = []
+        used: set[Tuple[int, int]] = set()
+        for pin in pins:
+            row = int(pin.row)
+            col = int(pin.col)
+            if not (0 <= row < height and 0 <= col < width):
+                continue
+            if (row, col) in used:
+                continue
+            name = str(pin.name or f"P{len(normalized) + 1}").strip() or f"P{len(normalized) + 1}"
+            normalized.append(ComponentPin(name, row, col))
+            used.add((row, col))
+        return normalized
+
+    def update_pin_count_label(self):
+        if not hasattr(self, "pin_count_label"):
+            return
+        try:
+            w = max(1, int(self.component_w.get()))
+            h = max(1, int(self.component_h.get()))
+        except Exception:
+            w, h = 1, 1
+        pins = self.normalized_pins(self.component_pin_template, w, h)
+        self.pin_count_label.set(f"Pins: {len(pins)} for new components")
 
     def _build_ui(self):
         root = ttk.Frame(self)
@@ -106,6 +156,11 @@ class PerfboardPlanner(tk.Tk):
 
         ttk.Button(side, text="Component color", command=self.choose_component_color).pack(fill=tk.X, pady=3)
         ttk.Button(side, text="Wire color", command=self.choose_wire_color).pack(fill=tk.X, pady=3)
+
+        self.pin_count_label = tk.StringVar(value="Pins: 2")
+        ttk.Label(side, textvariable=self.pin_count_label).pack(anchor="w", pady=(8, 2))
+        ttk.Button(side, text="Edit new-component pins", command=self.edit_new_component_pins).pack(fill=tk.X, pady=2)
+        ttk.Button(side, text="Edit selected pins", command=self.edit_selected_component_pins).pack(fill=tk.X, pady=2)
 
         ttk.Separator(side).pack(fill=tk.X, pady=10)
 
@@ -227,7 +282,205 @@ class PerfboardPlanner(tk.Tk):
         self.drag_start_grid: Optional[Tuple[int, int]] = None
         self.drag_component_original: Optional[Tuple[int, int]] = None
         self.update_zoom_label()
+        self.update_pin_count_label()
         self._update_mode_ui()
+
+    def edit_new_component_pins(self):
+        w = max(1, int(self.component_w.get()))
+        h = max(1, int(self.component_h.get()))
+        pins = self.normalized_pins(self.component_pin_template, w, h)
+        if not pins:
+            pins = self.default_pins_for_size(w, h)
+
+        def apply(updated_pins: List[ComponentPin]):
+            self.component_pin_template = self.normalized_pins(updated_pins, w, h)
+            self.update_pin_count_label()
+            self.status.set("New-component pin layout updated.")
+
+        self.open_pin_editor("Pin layout for new components", w, h, pins, apply)
+
+    def edit_selected_component_pins(self):
+        if self.selected_kind != "component" or self.selected_index is None:
+            self.status.set("Select a component first, then use Edit selected pins.")
+            return
+        comp = self.components[self.selected_index]
+        pins = self.normalized_pins(comp.pins, comp.width, comp.height)
+        if not pins:
+            pins = self.default_pins_for_size(comp.width, comp.height)
+
+        def apply(updated_pins: List[ComponentPin]):
+            comp.pins = self.normalized_pins(updated_pins, comp.width, comp.height)
+            self.status.set(f"Pins updated for {comp.name}.")
+            self.redraw()
+
+        self.open_pin_editor(f"Pin layout: {comp.name}", comp.width, comp.height, pins, apply)
+
+    def open_pin_editor(self, title: str, width: int, height: int, pins: List[ComponentPin], on_apply):
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.transient(self)
+        win.resizable(False, False)
+
+        info = ttk.Label(
+            win,
+            text=(
+                "Click cells to toggle component attachment pins.\n"
+                "Rows/columns are relative to the component's top-left hole."
+            ),
+            justify=tk.LEFT,
+            padding=8,
+        )
+        info.pack(anchor="w")
+
+        editor = ttk.Frame(win, padding=8)
+        editor.pack(fill=tk.BOTH, expand=True)
+
+        canvas_size_x = max(180, width * 42 + 40)
+        canvas_size_y = max(140, height * 42 + 40)
+        pin_canvas = tk.Canvas(editor, width=canvas_size_x, height=canvas_size_y, bg="#f7f7f7", highlightthickness=1, highlightbackground="#999999")
+        pin_canvas.grid(row=0, column=0, rowspan=8, sticky="nsew", padx=(0, 10))
+
+        pin_map: Dict[Tuple[int, int], str] = {(int(pin.row), int(pin.col)): pin.name for pin in self.normalized_pins(pins, width, height)}
+        selected_pos: List[Optional[Tuple[int, int]]] = [None]
+        cell = 42
+        left = 24
+        top = 24
+
+        list_var = tk.StringVar(value="")
+        ttk.Label(editor, text="Pins", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=1, sticky="w")
+        pin_list = tk.Listbox(editor, width=22, height=8, exportselection=False)
+        pin_list.grid(row=1, column=1, sticky="nsew")
+
+        def pins_sorted() -> List[Tuple[Tuple[int, int], str]]:
+            return sorted(pin_map.items(), key=lambda item: (item[0][0], item[0][1], item[1]))
+
+        def next_pin_name() -> str:
+            existing = set(pin_map.values())
+            idx = 1
+            while f"P{idx}" in existing:
+                idx += 1
+            return f"P{idx}"
+
+        def draw_editor():
+            pin_canvas.delete("all")
+            pin_list.delete(0, tk.END)
+            for row in range(height):
+                for col in range(width):
+                    x = left + col * cell
+                    y = top + row * cell
+                    is_selected = selected_pos[0] == (row, col)
+                    fill = "#ffffff" if (row, col) not in pin_map else "#ffe08a"
+                    outline = "#20639b" if is_selected else "#777777"
+                    outline_w = 3 if is_selected else 1
+                    pin_canvas.create_rectangle(x - 16, y - 16, x + 16, y + 16, fill=fill, outline=outline, width=outline_w)
+                    pin_canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#777777", outline="")
+                    pin_canvas.create_text(x, y + 22, text=f"{row},{col}", fill="#555555", font=("TkDefaultFont", 7))
+                    if (row, col) in pin_map:
+                        pin_canvas.create_oval(x - 11, y - 11, x + 11, y + 11, fill="#111111", outline="#ffffff", width=2)
+                        pin_canvas.create_text(x, y, text=pin_map[(row, col)], fill="#ffffff", font=("TkDefaultFont", 8, "bold"))
+            for (row, col), name in pins_sorted():
+                pin_list.insert(tk.END, f"{name}: row {row}, col {col}")
+
+        def canvas_to_cell(x: int, y: int) -> Optional[Tuple[int, int]]:
+            col = round((x - left) / cell)
+            row = round((y - top) / cell)
+            if 0 <= row < height and 0 <= col < width:
+                cx = left + col * cell
+                cy = top + row * cell
+                if abs(x - cx) <= 20 and abs(y - cy) <= 20:
+                    return row, col
+            return None
+
+        def on_editor_click(event):
+            pos = canvas_to_cell(event.x, event.y)
+            if pos is None:
+                return
+            selected_pos[0] = pos
+            if pos in pin_map:
+                del pin_map[pos]
+            else:
+                pin_map[pos] = next_pin_name()
+            draw_editor()
+
+        def on_list_select(event=None):
+            sel = pin_list.curselection()
+            sorted_items = pins_sorted()
+            if not sel or sel[0] >= len(sorted_items):
+                return
+            selected_pos[0] = sorted_items[sel[0]][0]
+            draw_editor()
+            pin_list.selection_set(sel[0])
+
+        def rename_selected():
+            pos = selected_pos[0]
+            if pos is None or pos not in pin_map:
+                messagebox.showinfo("Rename pin", "Select or create a pin first.", parent=win)
+                return
+            new_name = simpledialog.askstring("Rename pin", "Pin name:", initialvalue=pin_map[pos], parent=win)
+            if new_name is None:
+                return
+            new_name = new_name.strip()
+            if not new_name:
+                return
+            pin_map[pos] = new_name
+            draw_editor()
+
+        def clear_pins():
+            pin_map.clear()
+            selected_pos[0] = None
+            draw_editor()
+
+        def set_two_pin_horizontal():
+            pin_map.clear()
+            pin_map[(0, 0)] = "P1"
+            pin_map[(0, width - 1)] = "P2"
+            selected_pos[0] = None
+            draw_editor()
+
+        def set_four_corners():
+            pin_map.clear()
+            coords = [(0, 0), (0, width - 1), (height - 1, 0), (height - 1, width - 1)]
+            for idx, pos in enumerate(dict.fromkeys(coords), start=1):
+                pin_map[pos] = f"P{idx}"
+            selected_pos[0] = None
+            draw_editor()
+
+        def set_dip_sides():
+            pin_map.clear()
+            idx = 1
+            for row in range(height):
+                pin_map[(row, 0)] = f"P{idx}"
+                idx += 1
+            if width > 1:
+                for row in range(height - 1, -1, -1):
+                    pin_map[(row, width - 1)] = f"P{idx}"
+                    idx += 1
+            selected_pos[0] = None
+            draw_editor()
+
+        def apply_and_close():
+            updated = [ComponentPin(name, row, col) for (row, col), name in pins_sorted()]
+            on_apply(updated)
+            win.destroy()
+
+        pin_canvas.bind("<Button-1>", on_editor_click)
+        pin_list.bind("<<ListboxSelect>>", on_list_select)
+
+        ttk.Button(editor, text="Rename selected", command=rename_selected).grid(row=2, column=1, sticky="ew", pady=(8, 2))
+        ttk.Button(editor, text="Clear pins", command=clear_pins).grid(row=3, column=1, sticky="ew", pady=2)
+        ttk.Separator(editor).grid(row=4, column=1, sticky="ew", pady=6)
+        ttk.Button(editor, text="2-pin horizontal", command=set_two_pin_horizontal).grid(row=5, column=1, sticky="ew", pady=2)
+        ttk.Button(editor, text="4 corners", command=set_four_corners).grid(row=6, column=1, sticky="ew", pady=2)
+        ttk.Button(editor, text="DIP sides", command=set_dip_sides).grid(row=7, column=1, sticky="ew", pady=2)
+
+        bottom = ttk.Frame(win, padding=8)
+        bottom.pack(fill=tk.X)
+        ttk.Button(bottom, text="Apply", command=apply_and_close).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(bottom, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+
+        draw_editor()
+        win.grab_set()
+        win.wait_window()
 
     def _mode_changed(self):
         self.cancel_temp_wire()
@@ -480,6 +733,34 @@ class PerfboardPlanner(tk.Tk):
                 font=("TkDefaultFont", max(6, round(10 * self.zoom)), "bold"),
                 tags=("component", f"component:{i}"),
             )
+            self.draw_component_pins(i, comp, selected)
+
+    def draw_component_pins(self, component_index: int, comp: Component, selected: bool):
+        pins = self.normalized_pins(comp.pins, comp.width, comp.height)
+        for pin_index, pin in enumerate(pins):
+            x, y = self.grid_to_xy(comp.row + pin.row, comp.col + pin.col)
+            r = max(3, 5 * self.zoom)
+            outline = "#ffffff" if not selected else "#00d5ff"
+            self.canvas.create_oval(
+                x - r,
+                y - r,
+                x + r,
+                y + r,
+                fill="#111111",
+                outline=outline,
+                width=max(1, round(2 * self.zoom)),
+                tags=("component_pin", f"component_pin:{component_index}:{pin_index}", "component", f"component:{component_index}"),
+            )
+            if selected or self.zoom >= 1.15:
+                self.canvas.create_text(
+                    x + 7 * self.zoom,
+                    y - 8 * self.zoom,
+                    text=pin.name,
+                    anchor="w",
+                    fill="#ffffff" if selected else "#111111",
+                    font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"),
+                    tags=("component_pin", f"component_pin:{component_index}:{pin_index}", "component", f"component:{component_index}"),
+                )
 
     def draw_wires(self):
         for i, wire in enumerate(self.wires):
@@ -543,7 +824,8 @@ class PerfboardPlanner(tk.Tk):
             if row + h > self.rows or col + w > self.cols:
                 self.status.set("Component does not fit there.")
                 return
-            self.components.append(Component(self.current_name.get() or "Part", row, col, w, h, self.current_color.get()))
+            pins = self.normalized_pins(self.component_pin_template, w, h)
+            self.components.append(Component(self.current_name.get() or "Part", row, col, w, h, self.current_color.get(), self.copy_pins(pins)))
             self.selected_kind = "component"
             self.selected_index = len(self.components) - 1
             self.status.set("Component added.")
@@ -624,12 +906,25 @@ class PerfboardPlanner(tk.Tk):
         grid = self.xy_to_grid(cx, cy)
         if grid:
             row, col = grid
+            pin_text = self.pin_text_at_grid(grid)
+            location = f"{pin_text} at row {row + 1}, col {col + 1}" if pin_text else f"Hole row {row + 1}, col {col + 1}"
             if self.mode.get() == "wire" and self.temp_wire_points:
-                self.status.set(f"Wire target row {row + 1}, col {col + 1}. Click to finish, Shift+click for bend, Esc to cancel.")
+                self.status.set(f"Wire target: {location}. Click to finish, Shift+click for bend, Esc to cancel.")
+            elif self.mode.get() == "wire":
+                self.status.set(f"Wire start: {location}")
             else:
-                self.status.set(f"Hole row {row + 1}, col {col + 1}")
+                self.status.set(location)
         else:
             self.status.set(self._mode_style()["hint"])
+
+    def pin_text_at_grid(self, grid: Tuple[int, int]) -> str:
+        row, col = grid
+        hits: List[str] = []
+        for comp in self.components:
+            for pin in self.normalized_pins(comp.pins, comp.width, comp.height):
+                if comp.row + pin.row == row and comp.col + pin.col == col:
+                    hits.append(f"{comp.name}.{pin.name}")
+        return ", ".join(hits)
 
     def select_at(self, x: int, y: int):
         self.selected_kind = None
@@ -747,7 +1042,7 @@ class PerfboardPlanner(tk.Tk):
         if not path:
             return
         data = {
-            "version": 1,
+            "version": 2,
             "board": {"rows": self.rows, "cols": self.cols, "spacing": self.spacing},
             "components": [asdict(c) for c in self.components],
             "wires": [{"name": w.name, "points": w.points, "color": w.color} for w in self.wires],
@@ -771,7 +1066,18 @@ class PerfboardPlanner(tk.Tk):
             self.cols = int(board.get("cols", self.cols))
             self.spacing = int(board.get("spacing", self.spacing))
             self.update_zoom_label()
-            self.components = [Component(**c) for c in data.get("components", [])]
+            self.components = []
+            for c in data.get("components", []):
+                pins = [ComponentPin(pin.get("name", ""), int(pin.get("row", 0)), int(pin.get("col", 0))) for pin in c.get("pins", [])]
+                self.components.append(Component(
+                    c.get("name", "Part"),
+                    int(c.get("row", 0)),
+                    int(c.get("col", 0)),
+                    int(c.get("width", 1)),
+                    int(c.get("height", 1)),
+                    c.get("color", "#ffcc66"),
+                    pins,
+                ))
             self.wires = [Wire(w.get("name", ""), [tuple(p) for p in w.get("points", [])], w.get("color", "#d00000")) for w in data.get("wires", [])]
             self.selected_kind = None
             self.selected_index = None
