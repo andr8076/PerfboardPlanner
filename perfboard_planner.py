@@ -4220,6 +4220,1266 @@ class PerfboardPlanner(tk.Tk):
             )
 
 
+
+
+# ----------------------------------------------------------------------
+# v27 extension pass: component metadata/BOM, annotations, keepouts,
+# locks/groups, warning list, richer wire editing, simple route helper,
+# and front/back hole mapping help.
+# ----------------------------------------------------------------------
+
+V27_APP_VERSION = "v27"
+V27_SCHEMA_VERSION = 11
+
+
+def _v27_clean_color(value: str, default: str = "#777777") -> str:
+    value = str(value or "").strip()
+    if len(value) == 7 and value.startswith("#"):
+        return value
+    return default
+
+
+def _v27_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _v27_builtin_footprints():
+    def pins(items):
+        return [ComponentPin(name, row, col) for name, row, col in items]
+    return {
+        "Passive": [
+            {"label": "Resistor", "type": "resistor", "value": "10k", "category": "Passive", "width": 3, "height": 1, "color": "#d7c07a", "pins": pins([("A", 0, 0), ("B", 0, 2)]), "jumpers": []},
+            {"label": "Capacitor", "type": "capacitor", "value": "100nF", "category": "Passive", "width": 2, "height": 1, "color": "#9fd3ff", "pins": pins([("A", 0, 0), ("B", 0, 1)]), "jumpers": []},
+            {"label": "Electrolytic capacitor", "type": "electrolytic capacitor", "value": "10µF", "category": "Passive", "width": 2, "height": 2, "color": "#7da7d9", "pins": pins([("+", 2, 0), ("−", 2, 1)]), "jumpers": []},
+        ],
+        "Semiconductor": [
+            {"label": "Diode", "type": "diode", "value": "1N4148", "category": "Semiconductor", "width": 3, "height": 1, "color": "#e0e0e0", "pins": pins([("A", 0, 0), ("K", 0, 2)]), "jumpers": []},
+            {"label": "LED", "type": "LED", "value": "red", "category": "Semiconductor", "width": 2, "height": 1, "color": "#ff776b", "pins": pins([("A", 0, 0), ("K", 0, 1)]), "jumpers": []},
+            {"label": "TO-92 transistor", "type": "transistor", "value": "BC547", "category": "Semiconductor", "width": 3, "height": 2, "color": "#333333", "pins": pins([("E", 2, 0), ("B", 2, 1), ("C", 2, 2)]), "jumpers": []},
+        ],
+        "IC": [
+            {"label": "DIP-8", "type": "IC", "value": "NE555", "category": "IC", "width": 4, "height": 4, "color": "#444444", "pins": pins([("1", 0, -1), ("2", 1, -1), ("3", 2, -1), ("4", 3, -1), ("5", 3, 4), ("6", 2, 4), ("7", 1, 4), ("8", 0, 4)]), "jumpers": []},
+            {"label": "DIP-14", "type": "IC", "value": "", "category": "IC", "width": 4, "height": 7, "color": "#444444", "pins": pins([(str(i+1), i, -1) for i in range(7)] + [(str(14-i), i, 4) for i in range(7)]), "jumpers": []},
+        ],
+        "Connector": [
+            {"label": "2-pin screw terminal", "type": "screw terminal", "value": "2P", "category": "Connector", "width": 3, "height": 2, "color": "#78b66f", "pins": pins([("1", 2, 0), ("2", 2, 2)]), "jumpers": []},
+            {"label": "1x4 pin header", "type": "pin header", "value": "1x4", "category": "Connector", "width": 1, "height": 4, "color": "#e6d27a", "pins": pins([("1", 0, 0), ("2", 1, 0), ("3", 2, 0), ("4", 3, 0)]), "jumpers": []},
+        ],
+        "Module": [
+            {"label": "Small module", "type": "module", "value": "", "category": "Module", "width": 8, "height": 4, "color": "#79b6ff", "pins": pins([("P1", 0, -1), ("P2", 1, -1), ("P3", 2, -1), ("P4", 3, -1), ("P5", 0, 8), ("P6", 1, 8), ("P7", 2, 8), ("P8", 3, 8)]), "jumpers": []},
+        ],
+    }
+
+
+def _v27_ensure_fields(self):
+    if not hasattr(self, "project_info"):
+        self.project_info = {"title": "", "author": "", "revision": "", "notes": "", "todo": "", "changelog": ""}
+    if not hasattr(self, "annotations"):
+        self.annotations = []
+    if not hasattr(self, "keepouts"):
+        self.keepouts = []
+    if not hasattr(self, "groups"):
+        self.groups = {}
+    if not hasattr(self, "_keepout_start"):
+        self._keepout_start = None
+    if not hasattr(self, "_drag_wire_point"):
+        self._drag_wire_point = None
+    if not hasattr(self, "_hover_grid"):
+        self._hover_grid = None
+    if not hasattr(self, "_active_warning_target"):
+        self._active_warning_target = None
+    if not hasattr(self, "current_component_type"):
+        self.current_component_type = tk.StringVar(value="generic")
+    if not hasattr(self, "current_component_value"):
+        self.current_component_value = tk.StringVar(value="")
+    if not hasattr(self, "current_component_category"):
+        self.current_component_category = tk.StringVar(value="Custom")
+    if not hasattr(self, "current_annotation_color"):
+        self.current_annotation_color = tk.StringVar(value="#fff4a3")
+    if not hasattr(self, "current_keepout_color"):
+        self.current_keepout_color = tk.StringVar(value="#ff4d4d")
+    if hasattr(self, "mode_styles"):
+        self.mode_styles["label"] = {
+            "label": "ANNOTATION",
+            "color": "#6a1b9a",
+            "hint": "Click a hole to place a board note/annotation. This replaces the old text-label-as-component behavior.",
+        }
+        self.mode_styles["keepout"] = {
+            "label": "KEEPOUT ZONE",
+            "color": "#bf360c",
+            "hint": "Click one corner, then the opposite corner, to create a no-go mechanical keepout area.",
+        }
+    # Make sure older loaded components/wires have the new dynamic attributes.
+    for comp in getattr(self, "components", []):
+        if not hasattr(comp, "component_type"):
+            comp.component_type = getattr(comp, "type", "generic") or "generic"
+        if not hasattr(comp, "value"):
+            comp.value = ""
+        if not hasattr(comp, "category"):
+            comp.category = "Custom"
+        if not hasattr(comp, "locked"):
+            comp.locked = False
+        if not hasattr(comp, "group"):
+            comp.group = ""
+        if not hasattr(comp, "orientation_note"):
+            comp.orientation_note = ""
+    for wire in getattr(self, "wires", []):
+        if not hasattr(wire, "locked"):
+            wire.locked = False
+        if not hasattr(wire, "group"):
+            wire.group = ""
+
+
+PerfboardPlanner._v27_ensure_fields = _v27_ensure_fields
+
+
+def _v27_component_to_dict(self, comp):
+    data = asdict(comp)
+    data.update({
+        "component_type": getattr(comp, "component_type", "generic") or "generic",
+        "value": getattr(comp, "value", "") or "",
+        "category": getattr(comp, "category", "Custom") or "Custom",
+        "locked": bool(getattr(comp, "locked", False)),
+        "group": getattr(comp, "group", "") or "",
+        "orientation_note": getattr(comp, "orientation_note", "") or "",
+    })
+    return data
+
+
+def _v27_wire_to_dict(self, wire):
+    data = asdict(wire)
+    data.update({
+        "layer": "main",  # kept only for old-file compatibility
+        "lane": 0,
+        "locked": bool(getattr(wire, "locked", False)),
+        "group": getattr(wire, "group", "") or "",
+    })
+    return data
+
+
+def _v27_annotation_to_dict(note):
+    return {
+        "text": str(note.get("text", "")),
+        "row": int(note.get("row", 0)),
+        "col": int(note.get("col", 0)),
+        "side": note.get("side", "front") if note.get("side", "front") in {"front", "back", "both"} else "front",
+        "color": _v27_clean_color(note.get("color", "#fff4a3"), "#fff4a3"),
+        "locked": bool(note.get("locked", False)),
+        "group": str(note.get("group", "")),
+    }
+
+
+def _v27_keepout_to_dict(zone):
+    r1 = int(zone.get("row1", 0)); c1 = int(zone.get("col1", 0)); r2 = int(zone.get("row2", r1)); c2 = int(zone.get("col2", c1))
+    return {
+        "name": str(zone.get("name", "Keepout")) or "Keepout",
+        "row1": min(r1, r2), "col1": min(c1, c2), "row2": max(r1, r2), "col2": max(c1, c2),
+        "side": zone.get("side", "both") if zone.get("side", "both") in {"front", "back", "both"} else "both",
+        "color": _v27_clean_color(zone.get("color", "#ff4d4d"), "#ff4d4d"),
+        "locked": bool(zone.get("locked", False)),
+        "group": str(zone.get("group", "")),
+    }
+
+
+PerfboardPlanner._v27_component_to_dict = _v27_component_to_dict
+PerfboardPlanner._v27_wire_to_dict = _v27_wire_to_dict
+
+
+_v27_old_clone_component = PerfboardPlanner.clone_component.__func__
+def _v27_clone_component(cls, comp, row=None, col=None, name=None, side=None):
+    cloned = _v27_old_clone_component(cls, comp, row=row, col=col, name=name, side=side)
+    cloned.component_type = getattr(comp, "component_type", "generic") or "generic"
+    cloned.value = getattr(comp, "value", "") or ""
+    cloned.category = getattr(comp, "category", "Custom") or "Custom"
+    cloned.locked = bool(getattr(comp, "locked", False))
+    cloned.group = getattr(comp, "group", "") or ""
+    cloned.orientation_note = getattr(comp, "orientation_note", "") or ""
+    return cloned
+PerfboardPlanner.clone_component = classmethod(_v27_clone_component)
+
+
+_v27_old_clone_wire = PerfboardPlanner.clone_wire.__func__
+def _v27_clone_wire(cls, wire, points=None, side=None):
+    cloned = _v27_old_clone_wire(cls, wire, points=points, side=side)
+    cloned.locked = bool(getattr(wire, "locked", False))
+    cloned.group = getattr(wire, "group", "") or ""
+    return cloned
+PerfboardPlanner.clone_wire = classmethod(_v27_clone_wire)
+
+
+_v27_old_redraw = PerfboardPlanner.redraw
+def _v27_redraw(self):
+    self._v27_ensure_fields()
+    _v27_old_redraw(self)
+    # Keepouts are also drawn from draw_board; annotations/groups need to sit on top.
+    self.draw_v27_groups()
+    self.draw_v27_annotations()
+    self.draw_v27_warning_highlight()
+    bbox = self.canvas.bbox("all") if hasattr(self, "canvas") else None
+    if bbox:
+        self.canvas.configure(scrollregion=bbox)
+PerfboardPlanner.redraw = _v27_redraw
+
+
+_v27_old_draw_board = PerfboardPlanner.draw_board
+def _v27_draw_board(self):
+    self._v27_ensure_fields()
+    _v27_old_draw_board(self)
+    self.draw_v27_keepouts()
+PerfboardPlanner.draw_board = _v27_draw_board
+
+
+def _v27_side_visible(self, item_side: str, ghost_allowed: bool = True) -> bool:
+    active = self.current_side.get()
+    if item_side == "both" or item_side == active:
+        return True
+    if ghost_allowed and item_side == self.other_side() and self.show_opposite_layer.get():
+        return True
+    return False
+
+
+PerfboardPlanner._v27_side_visible = _v27_side_visible
+
+def _v27_zone_contains(zone, row, col, side=None):
+    z = _v27_keepout_to_dict(zone)
+    if side is not None and z["side"] not in {"both", side}:
+        return False
+    return z["row1"] <= int(row) <= z["row2"] and z["col1"] <= int(col) <= z["col2"]
+
+
+def _v27_draw_keepouts(self):
+    self._v27_ensure_fields()
+    for i, zone0 in enumerate(self.keepouts):
+        zone = _v27_keepout_to_dict(zone0)
+        if not self._v27_side_visible(zone["side"], ghost_allowed=True):
+            continue
+        x1, y1 = self.grid_to_xy(zone["row1"], zone["col1"])
+        x2, y2 = self.grid_to_xy(zone["row2"], zone["col2"])
+        pad = max(8.0, self.scaled_spacing() * 0.45)
+        left, right = sorted((x1, x2)); top, bottom = sorted((y1, y2))
+        ghost = zone["side"] not in {"both", self.current_side.get()}
+        fill = zone["color"] if not ghost else "#dddddd"
+        outline = zone["color"] if not ghost else "#888888"
+        self.canvas.create_rectangle(left - pad, top - pad, right + pad, bottom + pad, fill=fill, stipple="gray75", outline=outline, width=max(2, round(2 * self.zoom)), dash=(6, 3), tags=("keepout", f"keepout:{i}"))
+        label = zone["name"] + (" 🔒" if zone.get("locked") else "")
+        self.canvas.create_text(left - pad + 4, top - pad + 4, text=label, anchor="nw", fill="#7a0000" if not ghost else "#666666", font=("TkDefaultFont", max(7, round(8 * self.zoom)), "bold"), tags=("keepout", f"keepout:{i}"))
+    if getattr(self, "_keepout_start", None):
+        r, c = self._keepout_start
+        x, y = self.grid_to_xy(r, c)
+        rr = max(7, 9 * self.zoom)
+        self.canvas.create_oval(x-rr, y-rr, x+rr, y+rr, outline="#bf360c", width=3, tags=("keepout_preview",))
+PerfboardPlanner.draw_v27_keepouts = _v27_draw_keepouts
+
+
+def _v27_draw_annotations(self):
+    self._v27_ensure_fields()
+    for i, note0 in enumerate(self.annotations):
+        note = _v27_annotation_to_dict(note0)
+        if not self._v27_side_visible(note["side"], ghost_allowed=True):
+            continue
+        x, y = self.grid_to_xy(note["row"], note["col"])
+        ghost = note["side"] not in {"both", self.current_side.get()}
+        color = note["color"] if not ghost else "#e0e0e0"
+        text_color = "#111111" if not ghost else "#777777"
+        text = note["text"] or "Note"
+        if note.get("locked"):
+            text = "🔒 " + text
+        # note bubble
+        w = max(42, min(180, 8 * len(text) + 16)) * self.zoom / max(self.zoom, 1.0)
+        h = max(22, 20 + (len(text) // 24) * 12)
+        self.canvas.create_rectangle(x + 7*self.zoom, y - 8*self.zoom, x + 7*self.zoom + w, y - 8*self.zoom + h, fill=color, outline="#6a1b9a" if not ghost else "#999999", width=1, stipple="gray50" if ghost else "", tags=("annotation", f"annotation:{i}"))
+        self.canvas.create_text(x + 13*self.zoom, y - 2*self.zoom, text=text, anchor="nw", fill=text_color, font=("TkDefaultFont", max(7, round(8*self.zoom))), width=max(60, int(w - 10)), tags=("annotation", f"annotation:{i}"))
+        rr = max(3, 4*self.zoom)
+        self.canvas.create_oval(x-rr, y-rr, x+rr, y+rr, fill="#6a1b9a", outline="#ffffff", tags=("annotation", f"annotation:{i}"))
+PerfboardPlanner.draw_v27_annotations = _v27_draw_annotations
+
+
+def _v27_draw_groups(self):
+    self._v27_ensure_fields()
+    active = self.current_side.get()
+    grouped = {}
+    for i, comp in enumerate(self.components):
+        g = getattr(comp, "group", "") or ""
+        if g and comp.side == active:
+            rows = [comp.row, comp.row + comp.height - 1]
+            cols = [comp.col, comp.col + comp.width - 1]
+            grouped.setdefault(g, [[], []])
+            grouped[g][0].extend(rows); grouped[g][1].extend(cols)
+    for i, wire in enumerate(self.wires):
+        g = getattr(wire, "group", "") or ""
+        if g and wire.side == active:
+            grouped.setdefault(g, [[], []])
+            for r, c in wire.points:
+                grouped[g][0].append(int(r)); grouped[g][1].append(int(c))
+    for g, (rows, cols) in grouped.items():
+        if not rows or not cols:
+            continue
+        x1, y1 = self.grid_to_xy(min(rows), min(cols)); x2, y2 = self.grid_to_xy(max(rows), max(cols))
+        left, right = sorted((x1, x2)); top, bottom = sorted((y1, y2))
+        pad = max(16, 16*self.zoom)
+        self.canvas.create_rectangle(left-pad, top-pad, right+pad, bottom+pad, outline="#4444aa", width=max(1, round(2*self.zoom)), dash=(3, 4), tags=("group",))
+        self.canvas.create_text(left-pad+4, top-pad+2, text=f"Group: {g}", anchor="nw", fill="#222288", font=("TkDefaultFont", max(7, round(8*self.zoom)), "bold"), tags=("group",))
+    # lock marks
+    for i, comp in enumerate(self.components):
+        if comp.side == active and getattr(comp, "locked", False):
+            x, y = self.grid_to_xy(comp.row, comp.col)
+            self.canvas.create_text(x - 12*self.zoom, y - 14*self.zoom, text="🔒", anchor="center", fill="#111111", font=("TkDefaultFont", max(8, round(10*self.zoom))), tags=("lock", f"component:{i}"))
+    for i, wire in enumerate(self.wires):
+        if wire.side == active and getattr(wire, "locked", False) and wire.points:
+            r, c = wire.points[len(wire.points)//2]
+            x, y = self.grid_to_xy(r, c)
+            self.canvas.create_text(x + 8*self.zoom, y + 8*self.zoom, text="🔒", anchor="center", fill="#111111", font=("TkDefaultFont", max(8, round(10*self.zoom))), tags=("lock", f"wire:{i}"))
+PerfboardPlanner.draw_v27_groups = _v27_draw_groups
+
+
+def _v27_draw_warning_highlight(self):
+    target = getattr(self, "_active_warning_target", None)
+    if not target:
+        return
+    kind = target.get("kind")
+    if kind == "node":
+        side, row, col = target.get("side"), int(target.get("row", 0)), int(target.get("col", 0))
+        if side != self.current_side.get():
+            return
+        x, y = self.grid_to_xy(row, col); r = max(13, 17*self.zoom)
+        self.canvas.create_oval(x-r, y-r, x+r, y+r, outline="#ff00ff", width=max(2, round(3*self.zoom)), dash=(4, 3), tags=("warning_focus",))
+    elif kind == "component":
+        idx = int(target.get("index", -1))
+        if 0 <= idx < len(self.components) and self.components[idx].side == self.current_side.get():
+            pts = self.component_body_polygon(self.components[idx], pad=self.scaled_spacing()*0.7)
+            flat = [v for xy in pts for v in xy]
+            self.canvas.create_polygon(*flat, outline="#ff00ff", fill="", width=max(2, round(3*self.zoom)), dash=(4, 3), tags=("warning_focus",))
+PerfboardPlanner.draw_v27_warning_highlight = _v27_draw_warning_highlight
+
+
+_v27_old_on_click = PerfboardPlanner.on_click
+def _v27_on_click(self, event):
+    self._v27_ensure_fields()
+    self.canvas.focus_set()
+    cx, cy = self.canvas_event_xy(event)
+    grid = self.xy_to_grid(cx, cy)
+    mode = self.mode.get()
+
+    if mode == "label":
+        if grid is None:
+            return
+        text = simpledialog.askstring("Annotation", "Note text:", initialvalue="")
+        if text:
+            row, col = grid
+            self.annotations.append({"text": text, "row": row, "col": col, "side": self.current_side.get(), "color": self.current_annotation_color.get(), "locked": False, "group": ""})
+            self.status.set("Annotation added.")
+            self.redraw()
+        return "break"
+
+    if mode == "keepout":
+        if grid is None:
+            return "break"
+        if self._keepout_start is None:
+            self._keepout_start = grid
+            self.status.set("Keepout start set. Click the opposite corner.")
+            self.redraw()
+            return "break"
+        r1, c1 = self._keepout_start; r2, c2 = grid
+        self._keepout_start = None
+        name = simpledialog.askstring("Keepout zone", "Name:", initialvalue="Keepout") or "Keepout"
+        side = self.current_side.get()
+        if messagebox.askyesno("Keepout side", "Should this keepout apply to both sides?\n\nChoose No to apply it only to the current side."):
+            side = "both"
+        self.keepouts.append({"name": name, "row1": min(r1, r2), "col1": min(c1, c2), "row2": max(r1, r2), "col2": max(c1, c2), "side": side, "color": self.current_keepout_color.get(), "locked": False, "group": ""})
+        self.status.set("Keepout zone added.")
+        self.redraw()
+        return "break"
+
+    if mode == "component":
+        before = len(self.components)
+        result = _v27_old_on_click(self, event)
+        if len(self.components) > before:
+            comp = self.components[-1]
+            comp.component_type = self.current_component_type.get().strip() or "generic"
+            comp.value = self.current_component_value.get().strip()
+            comp.category = self.current_component_category.get().strip() or "Custom"
+            comp.locked = False
+            comp.group = ""
+            comp.orientation_note = ""
+            self.redraw()
+        return result
+
+    if mode == "select":
+        # Drag explicit wire bend/end points directly.
+        if grid is not None and not self.selection_modifier_is_down(event):
+            hit = self.v27_wire_point_at(cx, cy)
+            if hit is not None:
+                wire_index, point_index = hit
+                if not getattr(self.wires[wire_index], "locked", False):
+                    self.set_single_selection("wire", wire_index)
+                    self._drag_wire_point = (wire_index, point_index)
+                    self.drag_start_grid = None
+                    self.status.set("Drag the wire point to reshape the wire.")
+                    self.redraw()
+                    return "break"
+        result = _v27_old_on_click(self, event)
+        # Locked items can be selected but not dragged.
+        self.drag_component_originals = {i: p for i, p in getattr(self, "drag_component_originals", {}).items() if i < len(self.components) and not getattr(self.components[i], "locked", False)}
+        self.drag_wire_originals = {i: p for i, p in getattr(self, "drag_wire_originals", {}).items() if i < len(self.wires) and not getattr(self.wires[i], "locked", False)}
+        return result
+
+    return _v27_old_on_click(self, event)
+PerfboardPlanner.on_click = _v27_on_click
+
+
+def _v27_wire_point_at(self, x, y):
+    side = self.current_side.get()
+    threshold = max(8, 10*self.zoom)
+    for wi in range(len(self.wires)-1, -1, -1):
+        wire = self.wires[wi]
+        if wire.side != side or self.is_wire_color_hidden(wire.color):
+            continue
+        for pi, (r, c) in enumerate(wire.points):
+            px, py = self.grid_to_xy(r, c)
+            if ((x-px)**2 + (y-py)**2) ** 0.5 <= threshold:
+                return wi, pi
+    return None
+PerfboardPlanner.v27_wire_point_at = _v27_wire_point_at
+
+
+_v27_old_on_drag = PerfboardPlanner.on_drag
+def _v27_on_drag(self, event):
+    self._v27_ensure_fields()
+    if getattr(self, "_drag_wire_point", None):
+        wi, pi = self._drag_wire_point
+        if 0 <= wi < len(self.wires) and not getattr(self.wires[wi], "locked", False):
+            cx, cy = self.canvas_event_xy(event)
+            grid = self.xy_to_grid(cx, cy)
+            if grid is not None and 0 <= pi < len(self.wires[wi].points):
+                if self.wires[wi].points[pi] != grid:
+                    self.wires[wi].points[pi] = grid
+                    self.redraw()
+        return "break"
+    return _v27_old_on_drag(self, event)
+PerfboardPlanner.on_drag = _v27_on_drag
+
+
+_v27_old_on_release = PerfboardPlanner.on_release
+def _v27_on_release(self, event):
+    self._drag_wire_point = None
+    return _v27_old_on_release(self, event)
+PerfboardPlanner.on_release = _v27_on_release
+
+
+_v27_old_on_motion = PerfboardPlanner.on_motion
+def _v27_on_motion(self, event):
+    self._v27_ensure_fields()
+    cx, cy = self.canvas_event_xy(event)
+    grid = self.xy_to_grid(cx, cy)
+    self._hover_grid = grid
+    result = _v27_old_on_motion(self, event)
+    if grid:
+        row, col = grid
+        if self.current_side.get() == "front":
+            back_display_col = self.cols - col
+            self.status.set(self.status.get() + f" | Back physical view: row {row + 1}, display col {back_display_col}")
+        else:
+            front_col = col + 1
+            self.status.set(self.status.get() + f" | Front logical hole: row {row + 1}, col {front_col}")
+    return result
+PerfboardPlanner.on_motion = _v27_on_motion
+
+
+def _v27_delete_selected(self, event=None):
+    self._v27_ensure_fields()
+    if event is not None and self.event_from_text_input(event):
+        return
+    keys = self.selected_keys()
+    if not keys:
+        self.status.set("Nothing selected.")
+        return "break"
+    locked = []
+    deletable = []
+    for kind, idx in keys:
+        if kind == "component" and 0 <= idx < len(self.components) and getattr(self.components[idx], "locked", False):
+            locked.append((kind, idx))
+        elif kind == "wire" and 0 <= idx < len(self.wires) and getattr(self.wires[idx], "locked", False):
+            locked.append((kind, idx))
+        else:
+            deletable.append((kind, idx))
+    for i in sorted([idx for kind, idx in deletable if kind == "wire"], reverse=True):
+        if 0 <= i < len(self.wires):
+            del self.wires[i]
+    for i in sorted([idx for kind, idx in deletable if kind == "component"], reverse=True):
+        if 0 <= i < len(self.components):
+            del self.components[i]
+    self.clear_selection()
+    msg = f"Deleted {len(deletable)} item{'s' if len(deletable)!=1 else ''}."
+    if locked:
+        msg += f" Skipped {len(locked)} locked item{'s' if len(locked)!=1 else ''}."
+    self.status.set(msg)
+    self.redraw()
+    return "break"
+PerfboardPlanner.delete_selected = _v27_delete_selected
+
+
+def _v27_set_lock_selected(self, locked: bool):
+    self._v27_ensure_fields()
+    count = 0
+    for kind, idx in self.selected_keys():
+        if kind == "component" and 0 <= idx < len(self.components):
+            self.components[idx].locked = bool(locked); count += 1
+        elif kind == "wire" and 0 <= idx < len(self.wires):
+            self.wires[idx].locked = bool(locked); count += 1
+    self.status.set(("Locked" if locked else "Unlocked") + f" {count} selected item{'s' if count != 1 else ''}.")
+    self.redraw()
+PerfboardPlanner.v27_set_lock_selected = _v27_set_lock_selected
+
+
+def _v27_assign_group_selected(self):
+    self._v27_ensure_fields()
+    if not self.selected_keys():
+        self.status.set("Select items first, then assign a group.")
+        return
+    name = simpledialog.askstring("Group / module", "Group name:", initialvalue="Module 1")
+    if name is None:
+        return
+    name = name.strip()
+    count = 0
+    for kind, idx in self.selected_keys():
+        if kind == "component" and 0 <= idx < len(self.components):
+            self.components[idx].group = name; count += 1
+        elif kind == "wire" and 0 <= idx < len(self.wires):
+            self.wires[idx].group = name; count += 1
+    self.status.set(f"Assigned group '{name}' to {count} selected item{'s' if count != 1 else ''}.")
+    self.redraw()
+PerfboardPlanner.v27_assign_group_selected = _v27_assign_group_selected
+
+
+def _v27_clear_group_selected(self):
+    self._v27_ensure_fields()
+    count = 0
+    for kind, idx in self.selected_keys():
+        if kind == "component" and 0 <= idx < len(self.components):
+            self.components[idx].group = ""; count += 1
+        elif kind == "wire" and 0 <= idx < len(self.wires):
+            self.wires[idx].group = ""; count += 1
+    self.status.set(f"Cleared group from {count} selected item{'s' if count != 1 else ''}.")
+    self.redraw()
+PerfboardPlanner.v27_clear_group_selected = _v27_clear_group_selected
+
+
+def _v27_open_component_editor(self, component_index: int):
+    self._v27_ensure_fields()
+    if not (0 <= component_index < len(self.components)):
+        self.status.set("The selected component no longer exists.")
+        return
+    comp = self.components[component_index]
+    self._v27_ensure_fields()
+    win = tk.Toplevel(self)
+    win.title(f"Edit component: {comp.name}")
+    win.transient(self)
+    win.resizable(False, False)
+
+    name_var = tk.StringVar(value=comp.name)
+    value_var = tk.StringVar(value=getattr(comp, "value", ""))
+    type_var = tk.StringVar(value=getattr(comp, "component_type", "generic"))
+    category_var = tk.StringVar(value=getattr(comp, "category", "Custom"))
+    row_var = tk.IntVar(value=comp.row + 1)
+    col_var = tk.IntVar(value=comp.col + 1)
+    width_var = tk.IntVar(value=comp.width)
+    height_var = tk.IntVar(value=comp.height)
+    color_var = tk.StringVar(value=comp.color)
+    side_var = tk.StringVar(value=comp.side)
+    rotation_var = tk.IntVar(value=self.normalized_angle(getattr(comp, "rotation", 0)))
+    show_name_var = tk.BooleanVar(value=bool(getattr(comp, "show_name", True)))
+    show_pin_names_var = tk.BooleanVar(value=bool(getattr(comp, "show_pin_names", True)))
+    locked_var = tk.BooleanVar(value=bool(getattr(comp, "locked", False)))
+    group_var = tk.StringVar(value=getattr(comp, "group", ""))
+    orientation_var = tk.StringVar(value=getattr(comp, "orientation_note", ""))
+    edit_pins = self.copy_pins(comp.pins)
+    edit_jumpers = self.copy_jumpers(comp.jumpers)
+    pin_summary = tk.StringVar(value="")
+
+    body = ttk.Frame(win, padding=10)
+    body.pack(fill=tk.BOTH, expand=True)
+    row = 0
+    ttk.Label(body, text="Component", font=("TkDefaultFont", 11, "bold")).grid(row=row, column=0, columnspan=3, sticky="w"); row += 1
+    for label, var in [("Name", name_var), ("Value", value_var), ("Type", type_var), ("Category", category_var)]:
+        ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Entry(body, textvariable=var, width=28).grid(row=row, column=1, columnspan=2, sticky="ew", pady=2)
+        row += 1
+
+    ttk.Label(body, text="Position").grid(row=row, column=0, sticky="w", pady=2)
+    pos_frame = ttk.Frame(body); pos_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
+    ttk.Label(pos_frame, text="Row").pack(side=tk.LEFT); ttk.Spinbox(pos_frame, from_=1, to=max(1, self.rows), textvariable=row_var, width=5).pack(side=tk.LEFT, padx=(3,10))
+    ttk.Label(pos_frame, text="Col").pack(side=tk.LEFT); ttk.Spinbox(pos_frame, from_=1, to=max(1, self.cols), textvariable=col_var, width=5).pack(side=tk.LEFT, padx=(3,0)); row += 1
+
+    ttk.Label(body, text="Size").grid(row=row, column=0, sticky="w", pady=2)
+    size_frame = ttk.Frame(body); size_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
+    ttk.Label(size_frame, text="W").pack(side=tk.LEFT); ttk.Spinbox(size_frame, from_=1, to=max(1, self.cols), textvariable=width_var, width=5).pack(side=tk.LEFT, padx=(3,10))
+    ttk.Label(size_frame, text="H").pack(side=tk.LEFT); ttk.Spinbox(size_frame, from_=1, to=max(1, self.rows), textvariable=height_var, width=5).pack(side=tk.LEFT, padx=(3,0)); row += 1
+
+    ttk.Label(body, text="Side").grid(row=row, column=0, sticky="w", pady=2)
+    side_frame = ttk.Frame(body); side_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
+    ttk.Radiobutton(side_frame, text="Front", variable=side_var, value="front").pack(side=tk.LEFT)
+    ttk.Radiobutton(side_frame, text="Back", variable=side_var, value="back").pack(side=tk.LEFT, padx=(12,0)); row += 1
+
+    ttk.Label(body, text="Body angle").grid(row=row, column=0, sticky="w", pady=2)
+    ttk.Combobox(body, textvariable=rotation_var, values=[0,45,90,135,180,225,270,315], state="readonly", width=8).grid(row=row, column=1, sticky="w", pady=2); row += 1
+
+    ttk.Label(body, text="Orientation note").grid(row=row, column=0, sticky="w", pady=2)
+    ttk.Entry(body, textvariable=orientation_var, width=28).grid(row=row, column=1, columnspan=2, sticky="ew", pady=2); row += 1
+
+    ttk.Label(body, text="Color").grid(row=row, column=0, sticky="w", pady=2)
+    color_preview = tk.Label(body, textvariable=color_var, bg=color_var.get(), fg="#111111", width=12, relief=tk.SUNKEN)
+    color_preview.grid(row=row, column=1, sticky="w", pady=2)
+    def choose_color():
+        color = colorchooser.askcolor(color=color_var.get(), title="Choose component color", parent=win)
+        if color and color[1]:
+            color_var.set(color[1]); color_preview.configure(bg=color[1])
+    ttk.Button(body, text="Choose…", command=choose_color).grid(row=row, column=2, sticky="ew", padx=(6,0), pady=2); row += 1
+
+    ttk.Label(body, text="Labels / lock").grid(row=row, column=0, sticky="w", pady=2)
+    opt_frame = ttk.Frame(body); opt_frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
+    ttk.Checkbutton(opt_frame, text="Name", variable=show_name_var).pack(side=tk.LEFT)
+    ttk.Checkbutton(opt_frame, text="Pin names", variable=show_pin_names_var).pack(side=tk.LEFT, padx=(8,0))
+    ttk.Checkbutton(opt_frame, text="Locked", variable=locked_var).pack(side=tk.LEFT, padx=(8,0)); row += 1
+
+    ttk.Label(body, text="Group/module").grid(row=row, column=0, sticky="w", pady=2)
+    ttk.Entry(body, textvariable=group_var, width=28).grid(row=row, column=1, columnspan=2, sticky="ew", pady=2); row += 1
+
+    ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=8); row += 1
+    ttk.Label(body, text="Attachment pins", font=("TkDefaultFont", 10, "bold")).grid(row=row, column=0, columnspan=3, sticky="w"); row += 1
+    ttk.Label(body, textvariable=pin_summary).grid(row=row, column=0, columnspan=3, sticky="w", pady=(2,2)); row += 1
+
+    def read_size():
+        try: return max(1, int(width_var.get())), max(1, int(height_var.get()))
+        except Exception: return max(1, comp.width), max(1, comp.height)
+    def update_pin_summary(*_):
+        w, h = read_size(); kept = self.normalized_pins(edit_pins, w, h); kept_jumpers = self.normalized_jumpers(edit_jumpers, kept)
+        pin_summary.set(f"Pins: {len(kept)}, internal jumpers: {len(kept_jumpers)}")
+    def edit_pins_action():
+        nonlocal edit_pins, edit_jumpers
+        w, h = read_size(); pins = self.normalized_pins(edit_pins, w, h)
+        def apply_pins(updated_pins, updated_jumpers=None):
+            nonlocal edit_pins, edit_jumpers
+            edit_pins = self.normalized_pins(updated_pins, w, h)
+            edit_jumpers = self.normalized_jumpers(updated_jumpers or [], edit_pins)
+            update_pin_summary()
+        self.open_pin_editor(f"Pin layout: {name_var.get() or comp.name}", w, h, pins, apply_pins, jumpers=edit_jumpers)
+    ttk.Button(body, text="Edit pins / internal jumpers…", command=edit_pins_action).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(2,0)); row += 1
+    for variable in (width_var, height_var):
+        variable.trace_add("write", update_pin_summary)
+    update_pin_summary()
+
+    def apply_changes():
+        if not (0 <= component_index < len(self.components)):
+            win.destroy(); self.status.set("The selected component no longer exists."); return
+        try:
+            width = max(1, int(width_var.get())); height = max(1, int(height_var.get()))
+            r = max(0, int(row_var.get()) - 1); c = max(0, int(col_var.get()) - 1)
+        except Exception:
+            messagebox.showerror("Invalid values", "Row, column, width, and height must be numbers.", parent=win); return
+        edited = self.components[component_index]
+        r = max(0, min(max(0, self.rows - height), r)); c = max(0, min(max(0, self.cols - width), c))
+        edited.name = name_var.get().strip() or "Part"
+        edited.value = value_var.get().strip()
+        edited.component_type = type_var.get().strip() or "generic"
+        edited.category = category_var.get().strip() or "Custom"
+        edited.row = r; edited.col = c; edited.width = width; edited.height = height
+        edited.color = color_var.get() or "#ffcc66"
+        edited.side = side_var.get() if side_var.get() in {"front", "back"} else self.current_side.get()
+        edited.rotation = self.normalized_angle(rotation_var.get())
+        edited.orientation_note = orientation_var.get().strip()
+        edited.show_name = bool(show_name_var.get()); edited.show_pin_names = bool(show_pin_names_var.get())
+        edited.locked = bool(locked_var.get()); edited.group = group_var.get().strip()
+        edited.pins = self.normalized_pins(edit_pins, width, height)
+        edited.jumpers = self.normalized_jumpers(edit_jumpers, edited.pins)
+        self.set_single_selection("component", component_index)
+        self.current_side.set(edited.side)
+        self.status.set(f"Updated component {edited.name}.")
+        win.destroy(); self.redraw()
+
+    bottom = ttk.Frame(win, padding=(10,0,10,10)); bottom.pack(fill=tk.X)
+    ttk.Button(bottom, text="Apply", command=apply_changes).pack(side=tk.RIGHT, padx=(5,0))
+    ttk.Button(bottom, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+    win.bind("<Return>", lambda event: apply_changes()); win.bind("<Escape>", lambda event: win.destroy())
+    win.grab_set(); win.wait_window()
+PerfboardPlanner.open_component_editor = _v27_open_component_editor
+
+
+def _v27_open_wire_editor(self, wire_index: int):
+    self._v27_ensure_fields()
+    if not (0 <= wire_index < len(self.wires)):
+        self.status.set("The selected wire no longer exists."); return
+    wire = self.wires[wire_index]
+    win = tk.Toplevel(self); win.title("Edit wire"); win.transient(self); win.resizable(False, False)
+    name_var = tk.StringVar(value=wire.name); color_var = tk.StringVar(value=wire.color); side_var = tk.StringVar(value=wire.side)
+    locked_var = tk.BooleanVar(value=bool(getattr(wire, "locked", False))); group_var = tk.StringVar(value=getattr(wire, "group", ""))
+    edit_points = [tuple(p) for p in wire.points]
+    body = ttk.Frame(win, padding=10); body.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(body, text="Wire", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, columnspan=4, sticky="w")
+    ttk.Label(body, text="Name").grid(row=1, column=0, sticky="w", pady=2); ttk.Entry(body, textvariable=name_var, width=24).grid(row=1, column=1, columnspan=3, sticky="ew", pady=2)
+    ttk.Label(body, text="Side").grid(row=2, column=0, sticky="w", pady=2); sf=ttk.Frame(body); sf.grid(row=2, column=1, columnspan=3, sticky="w")
+    ttk.Radiobutton(sf, text="Front", variable=side_var, value="front").pack(side=tk.LEFT); ttk.Radiobutton(sf, text="Back", variable=side_var, value="back").pack(side=tk.LEFT, padx=(12,0))
+    ttk.Label(body, text="Color").grid(row=3, column=0, sticky="w", pady=2)
+    preview = tk.Label(body, textvariable=color_var, bg=color_var.get(), width=12, relief=tk.SUNKEN); preview.grid(row=3, column=1, sticky="w", pady=2)
+    def choose_color():
+        color = colorchooser.askcolor(color=color_var.get(), title="Choose wire color", parent=win)
+        if color and color[1]: color_var.set(color[1]); preview.configure(bg=color[1])
+    ttk.Button(body, text="Choose…", command=choose_color).grid(row=3, column=2, columnspan=2, sticky="ew", padx=(6,0))
+    ttk.Checkbutton(body, text="Locked", variable=locked_var).grid(row=4, column=1, sticky="w", pady=2)
+    ttk.Label(body, text="Group/module").grid(row=5, column=0, sticky="w", pady=2); ttk.Entry(body, textvariable=group_var, width=24).grid(row=5, column=1, columnspan=3, sticky="ew", pady=2)
+    ttk.Separator(body).grid(row=6, column=0, columnspan=4, sticky="ew", pady=8)
+    ttk.Label(body, text="Wire points", font=("TkDefaultFont", 10, "bold")).grid(row=7, column=0, columnspan=4, sticky="w")
+    lb = tk.Listbox(body, height=7, width=30); lb.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=4)
+    def refresh_points():
+        lb.delete(0, tk.END)
+        for i, (r,c) in enumerate(edit_points): lb.insert(tk.END, f"{i+1}: row {r+1}, col {c+1}")
+    def selected_point_index():
+        sel=lb.curselection(); return sel[0] if sel else None
+    def edit_point():
+        idx=selected_point_index()
+        if idx is None: return
+        r,c=edit_points[idx]
+        nr=simpledialog.askinteger("Point row", "Row:", initialvalue=r+1, minvalue=1, maxvalue=self.rows, parent=win)
+        if nr is None: return
+        nc=simpledialog.askinteger("Point column", "Column:", initialvalue=c+1, minvalue=1, maxvalue=self.cols, parent=win)
+        if nc is None: return
+        edit_points[idx]=(nr-1,nc-1); refresh_points(); lb.selection_set(idx)
+    def insert_after():
+        idx=selected_point_index()
+        if idx is None: idx=len(edit_points)-1
+        base=edit_points[idx] if edit_points else (0,0)
+        edit_points.insert(idx+1, base); refresh_points(); lb.selection_set(idx+1)
+    def remove_point():
+        idx=selected_point_index()
+        if idx is not None and len(edit_points)>2:
+            edit_points.pop(idx); refresh_points(); lb.selection_set(min(idx, len(edit_points)-1))
+    btns=ttk.Frame(body); btns.grid(row=8, column=3, sticky="nsw", padx=(6,0))
+    ttk.Button(btns, text="Edit", command=edit_point).pack(fill=tk.X, pady=1)
+    ttk.Button(btns, text="Insert", command=insert_after).pack(fill=tk.X, pady=1)
+    ttk.Button(btns, text="Remove", command=remove_point).pack(fill=tk.X, pady=1)
+    ttk.Label(body, text="Tip: in Select mode, drag an endpoint/bend dot directly on the board to reshape a wire.", wraplength=320, justify=tk.LEFT).grid(row=9, column=0, columnspan=4, sticky="w", pady=(4,0))
+    refresh_points()
+    def apply_changes():
+        if len(edit_points) < 2:
+            messagebox.showerror("Wire needs points", "A wire needs at least two points.", parent=win); return
+        if not (0 <= wire_index < len(self.wires)):
+            win.destroy(); self.status.set("The selected wire no longer exists."); return
+        edited=self.wires[wire_index]
+        edited.name=name_var.get().strip(); edited.color=color_var.get() or "#d00000"; edited.side=side_var.get() if side_var.get() in {"front","back"} else self.current_side.get()
+        edited.locked=bool(locked_var.get()); edited.group=group_var.get().strip(); edited.points=list(edit_points); edited.layer="main"; edited.lane=0
+        self.set_single_selection("wire", wire_index); self.current_side.set(edited.side); self.status.set("Updated wire."); win.destroy(); self.redraw()
+    bottom=ttk.Frame(win, padding=(10,0,10,10)); bottom.pack(fill=tk.X)
+    ttk.Button(bottom, text="Apply", command=apply_changes).pack(side=tk.RIGHT, padx=(5,0)); ttk.Button(bottom, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+    win.bind("<Escape>", lambda event: win.destroy()); win.grab_set(); win.wait_window()
+PerfboardPlanner.open_wire_editor = _v27_open_wire_editor
+
+
+def _v27_grid_occupied_score(self, points, side):
+    score = 0
+    for r, c in points:
+        for zone in self.keepouts:
+            if _v27_zone_contains(zone, r, c, side): score += 20
+        for comp in self.components:
+            if comp.side == side and comp.row <= r <= comp.row+comp.height-1 and comp.col <= c <= comp.col+comp.width-1:
+                score += 2
+    return score
+
+
+PerfboardPlanner._v27_grid_occupied_score = _v27_grid_occupied_score
+
+def _v27_expand_path_points(a, b):
+    (r1,c1),(r2,c2)=a,b; pts=[]
+    if r1==r2:
+        step=1 if c2>=c1 else -1
+        pts=[(r1,c) for c in range(c1,c2+step,step)]
+    elif c1==c2:
+        step=1 if r2>=r1 else -1
+        pts=[(r,c1) for r in range(r1,r2+step,step)]
+    else:
+        pts=[a,b]
+    return pts
+
+
+def _v27_suggest_route_between_holes(self):
+    self._v27_ensure_fields()
+    side=self.current_side.get()
+    if self.temp_wire_points:
+        sr, sc = self.temp_wire_points[0]
+    else:
+        sr=simpledialog.askinteger("Start row", "Start row:", minvalue=1, maxvalue=self.rows, parent=self)
+        if sr is None: return
+        sc=simpledialog.askinteger("Start column", "Start column:", minvalue=1, maxvalue=self.cols, parent=self)
+        if sc is None: return
+        sr-=1; sc-=1
+    er=simpledialog.askinteger("End row", "End row:", minvalue=1, maxvalue=self.rows, parent=self)
+    if er is None: return
+    ec=simpledialog.askinteger("End column", "End column:", minvalue=1, maxvalue=self.cols, parent=self)
+    if ec is None: return
+    er-=1; ec-=1
+    candidates = [
+        [(sr,sc),(sr,ec),(er,ec)],
+        [(sr,sc),(er,sc),(er,ec)],
+    ]
+    best=None; best_score=None
+    for cand in candidates:
+        expanded=[]
+        for a,b in zip(cand,cand[1:]): expanded.extend(_v27_expand_path_points(a,b))
+        score=self._v27_grid_occupied_score(expanded, side) + len(cand)
+        if best_score is None or score<best_score:
+            best, best_score = cand, score
+    if best:
+        # remove duplicate middle points if start/end line already straight
+        simplified=[]
+        for p in best:
+            if not simplified or simplified[-1]!=p: simplified.append(p)
+        if len(simplified) >= 2:
+            self.wires.append(Wire("", simplified, self.current_wire_color.get(), side=side, lane=0))
+            self.temp_wire_points.clear(); self.set_single_selection("wire", len(self.wires)-1)
+            self.status.set("Suggested route added. You can drag bend points to adjust it.")
+            self.redraw()
+PerfboardPlanner.v27_suggest_route_between_holes = _v27_suggest_route_between_holes
+
+
+def _v27_open_project_info(self):
+    self._v27_ensure_fields()
+    win=tk.Toplevel(self); win.title("Project information"); win.transient(self); win.geometry("520x520")
+    body=ttk.Frame(win, padding=10); body.pack(fill=tk.BOTH, expand=True)
+    vars={k: tk.StringVar(value=self.project_info.get(k,"")) for k in ["title","author","revision"]}
+    row=0
+    for label,key in [("Title","title"),("Author","author"),("Revision","revision")]:
+        ttk.Label(body, text=label).grid(row=row,column=0,sticky="w",pady=2)
+        ttk.Entry(body, textvariable=vars[key], width=45).grid(row=row,column=1,sticky="ew",pady=2); row+=1
+    texts={}
+    for label,key,height in [("Notes","notes",6),("Todo","todo",5),("Changelog","changelog",6)]:
+        ttk.Label(body, text=label).grid(row=row,column=0,sticky="nw",pady=(8,2))
+        txt=tk.Text(body, height=height, width=45); txt.grid(row=row,column=1,sticky="nsew",pady=(8,2)); txt.insert("1.0", self.project_info.get(key,"")); texts[key]=txt; row+=1
+    body.columnconfigure(1, weight=1); body.rowconfigure(row-1, weight=1)
+    def apply():
+        for k,v in vars.items(): self.project_info[k]=v.get().strip()
+        for k,t in texts.items(): self.project_info[k]=t.get("1.0", "end-1c")
+        title=self.project_info.get("title", "").strip()
+        self.title(f"Perfboard Planner — {title}" if title else "Perfboard Planner")
+        self.status.set("Project information updated."); win.destroy(); self.redraw()
+    bottom=ttk.Frame(win,padding=(10,0,10,10)); bottom.pack(fill=tk.X)
+    ttk.Button(bottom,text="Apply",command=apply).pack(side=tk.RIGHT,padx=(5,0)); ttk.Button(bottom,text="Cancel",command=win.destroy).pack(side=tk.RIGHT)
+PerfboardPlanner.v27_open_project_info = _v27_open_project_info
+
+
+def _v27_bom_rows(self):
+    self._v27_ensure_fields()
+    rows={}
+    for comp in self.components:
+        typ=getattr(comp,"component_type","generic") or "generic"
+        val=getattr(comp,"value","") or ""
+        cat=getattr(comp,"category","Custom") or "Custom"
+        key=(cat, typ, val)
+        rows.setdefault(key, {"category":cat,"type":typ,"value":val,"qty":0,"refs":[]})
+        rows[key]["qty"] += 1; rows[key]["refs"].append(comp.name)
+    return sorted(rows.values(), key=lambda r:(r["category"].lower(), r["type"].lower(), r["value"].lower()))
+PerfboardPlanner.v27_bom_rows = _v27_bom_rows
+
+
+def _v27_open_bom(self):
+    self._v27_ensure_fields(); rows=self.v27_bom_rows()
+    win=tk.Toplevel(self); win.title("Bill of materials"); win.transient(self); win.geometry("720x420")
+    frame=ttk.Frame(win,padding=8); frame.pack(fill=tk.BOTH,expand=True)
+    cols=("qty","category","type","value","refs")
+    tree=ttk.Treeview(frame, columns=cols, show="headings", height=14)
+    headings={"qty":"Qty","category":"Category","type":"Type","value":"Value","refs":"Components"}
+    for c in cols:
+        tree.heading(c,text=headings[c]); tree.column(c,width=80 if c!="refs" else 260, anchor="w")
+    tree.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
+    sb=ttk.Scrollbar(frame,orient=tk.VERTICAL,command=tree.yview); sb.pack(side=tk.RIGHT,fill=tk.Y); tree.configure(yscrollcommand=sb.set)
+    for r in rows:
+        tree.insert("", tk.END, values=(r["qty"], r["category"], r["type"], r["value"], ", ".join(r["refs"])))
+    def export_csv():
+        path=filedialog.asksaveasfilename(title="Export BOM CSV", defaultextension=".csv", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+        if not path: return
+        def esc(s):
+            s=str(s).replace('"','""'); return f'"{s}"'
+        lines=["Qty;Category;Type;Value;Components"]
+        for r in rows:
+            lines.append(";".join([str(r["qty"]), esc(r["category"]), esc(r["type"]), esc(r["value"]), esc(", ".join(r["refs"]))]))
+        with open(path,"w",encoding="utf-8") as f: f.write("\n".join(lines))
+        self.status.set(f"BOM exported: {path}")
+    bottom=ttk.Frame(win,padding=8); bottom.pack(fill=tk.X)
+    ttk.Button(bottom,text="Export CSV",command=export_csv).pack(side=tk.RIGHT)
+PerfboardPlanner.v27_open_bom = _v27_open_bom
+
+
+def _v27_open_component_library(self):
+    self._v27_ensure_fields(); lib=_v27_builtin_footprints()
+    win=tk.Toplevel(self); win.title("Component library"); win.transient(self); win.geometry("560x360")
+    body=ttk.Frame(win,padding=8); body.pack(fill=tk.BOTH,expand=True)
+    cat_var=tk.StringVar(value=next(iter(lib.keys())))
+    ttk.Label(body,text="Category").grid(row=0,column=0,sticky="w")
+    cat=ttk.Combobox(body,textvariable=cat_var,values=list(lib.keys()),state="readonly",width=18); cat.grid(row=1,column=0,sticky="nsw",pady=4)
+    listbox=tk.Listbox(body,width=34,height=12); listbox.grid(row=1,column=1,sticky="nsew",padx=(8,0),pady=4)
+    info=tk.StringVar(value=""); ttk.Label(body,textvariable=info,wraplength=480,justify=tk.LEFT).grid(row=2,column=0,columnspan=2,sticky="w",pady=(4,0))
+    body.columnconfigure(1,weight=1); body.rowconfigure(1,weight=1)
+    def refresh(*_):
+        listbox.delete(0,tk.END)
+        for item in lib.get(cat_var.get(),[]): listbox.insert(tk.END,item["label"])
+        if listbox.size(): listbox.selection_set(0); update_info()
+    def current_item():
+        sel=listbox.curselection()
+        if not sel: return None
+        return lib.get(cat_var.get(),[])[sel[0]]
+    def update_info(*_):
+        item=current_item()
+        if item: info.set(f"{item['label']} — {item['type']} {item.get('value','')} | {item['width']}×{item['height']} | pins: {len(item['pins'])}")
+    def load_item():
+        item=current_item()
+        if not item: return
+        self.component_w.set(item["width"]); self.component_h.set(item["height"]); self.current_name.set(item["label"])
+        self.current_component_type.set(item["type"]); self.current_component_value.set(item.get("value", "")); self.current_component_category.set(item.get("category", cat_var.get()))
+        self.current_color.set(item.get("color", "#ffcc66")); self.component_pin_template=self.copy_pins(item["pins"]); self.component_jumper_template=self.copy_jumpers(item.get("jumpers", []))
+        self.mode.set("component"); self._mode_changed(); self.status.set(f"Loaded {item['label']} as new-component template."); win.destroy()
+    def save_selected():
+        self.save_selected_footprint()
+    cat.bind("<<ComboboxSelected>>", refresh); listbox.bind("<<ListboxSelect>>", update_info); refresh()
+    bottom=ttk.Frame(win,padding=8); bottom.pack(fill=tk.X)
+    ttk.Button(bottom,text="Use selected",command=load_item).pack(side=tk.RIGHT,padx=(5,0))
+    ttk.Button(bottom,text="Save selected component as footprint…",command=save_selected).pack(side=tk.RIGHT)
+PerfboardPlanner.v27_open_component_library = _v27_open_component_library
+
+
+def _v27_extension_warnings(self):
+    self._v27_ensure_fields()
+    warnings=[]
+    # keepout violations: component body corners/pins and explicit wire points
+    for zi, zone in enumerate(self.keepouts):
+        z=_v27_keepout_to_dict(zone)
+        if z["row1"]<0 or z["col1"]<0 or z["row2"]>=self.rows or z["col2"]>=self.cols:
+            warnings.append({"text": f"Keepout '{z['name']}' reaches outside the board.", "kind":"node", "side": self.current_side.get(), "row": max(0,min(self.rows-1,z['row1'])), "col": max(0,min(self.cols-1,z['col1']))})
+        for ci, comp in enumerate(self.components):
+            if z["side"] not in {"both", comp.side}: continue
+            test=[(comp.row,comp.col),(comp.row+comp.height-1,comp.col+comp.width-1)]
+            test += [(comp.row+p.row, comp.col+p.col) for p in self.normalized_pins(comp.pins, comp.width, comp.height)]
+            if any(_v27_zone_contains(z, r, c, comp.side) for r,c in test):
+                warnings.append({"text": f"Component {comp.name} enters keepout '{z['name']}'.", "kind":"component", "index":ci})
+        for wi, wire in enumerate(self.wires):
+            if z["side"] not in {"both", wire.side}: continue
+            for r,c in wire.points:
+                if _v27_zone_contains(z,r,c,wire.side):
+                    warnings.append({"text": f"Wire point enters keepout '{z['name']}' on {wire.side} side.", "kind":"node", "side":wire.side, "row":r, "col":c}); break
+    for i,note in enumerate(self.annotations):
+        n=_v27_annotation_to_dict(note)
+        if not (0 <= n["row"] < self.rows and 0 <= n["col"] < self.cols):
+            warnings.append({"text": f"Annotation '{n['text'][:24]}' is outside the board.", "kind":"node", "side": self.current_side.get(), "row": max(0,min(self.rows-1,n['row'])), "col": max(0,min(self.cols-1,n['col']))})
+    return warnings
+PerfboardPlanner.v27_extension_warnings = _v27_extension_warnings
+
+
+_v27_old_layout_warning_messages = PerfboardPlanner.layout_warning_messages
+def _v27_layout_warning_messages(self):
+    msgs = _v27_old_layout_warning_messages(self)
+    msgs.extend([w["text"] for w in self.v27_extension_warnings()])
+    return msgs
+PerfboardPlanner.layout_warning_messages = _v27_layout_warning_messages
+
+
+def _v27_open_warning_list(self):
+    self._v27_ensure_fields(); self.update_layout_warning_sets()
+    base=[{"text":m,"kind":"text"} for m in _v27_old_layout_warning_messages(self)]
+    ext=self.v27_extension_warnings(); items=base+ext
+    win=tk.Toplevel(self); win.title("Layout warnings"); win.transient(self); win.geometry("620x360")
+    body=ttk.Frame(win,padding=8); body.pack(fill=tk.BOTH,expand=True)
+    lb=tk.Listbox(body,height=14); lb.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
+    sb=ttk.Scrollbar(body,orient=tk.VERTICAL,command=lb.yview); sb.pack(side=tk.RIGHT,fill=tk.Y); lb.configure(yscrollcommand=sb.set)
+    if not items: items=[{"text":"No obvious layout warnings found.","kind":"text"}]
+    for item in items: lb.insert(tk.END,item["text"])
+    def on_select(evt=None):
+        sel=lb.curselection()
+        if not sel: return
+        item=items[sel[0]]; self._active_warning_target=item if item.get("kind") in {"node","component"} else None
+        if item.get("kind") == "node" and item.get("side") in {"front","back"}: self.current_side.set(item["side"])
+        if item.get("kind") == "component" and 0 <= item.get("index", -1) < len(self.components):
+            comp=self.components[item["index"]]; self.current_side.set(comp.side); self.set_single_selection("component", item["index"])
+        self.redraw()
+    lb.bind("<<ListboxSelect>>", on_select)
+    bottom=ttk.Frame(win,padding=8); bottom.pack(fill=tk.X)
+    ttk.Button(bottom,text="Clear focus",command=lambda:(setattr(self,"_active_warning_target",None),self.redraw())).pack(side=tk.RIGHT)
+PerfboardPlanner.v27_open_warning_list = _v27_open_warning_list
+
+
+def _v27_open_annotations_manager(self):
+    self._v27_ensure_fields()
+    win=tk.Toplevel(self); win.title("Annotations"); win.transient(self); win.geometry("560x340")
+    body=ttk.Frame(win,padding=8); body.pack(fill=tk.BOTH,expand=True)
+    lb=tk.Listbox(body,height=12); lb.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
+    def refresh():
+        lb.delete(0,tk.END)
+        for n0 in self.annotations:
+            n=_v27_annotation_to_dict(n0); lb.insert(tk.END, f"{n['side']} R{n['row']+1}C{n['col']+1}: {n['text'][:60]}")
+    def sel():
+        s=lb.curselection(); return s[0] if s else None
+    def edit():
+        i=sel();
+        if i is None: return
+        n=_v27_annotation_to_dict(self.annotations[i])
+        text=simpledialog.askstring("Annotation", "Text:", initialvalue=n["text"], parent=win)
+        if text is None: return
+        n["text"]=text; self.annotations[i]=n; refresh(); self.redraw()
+    def delete():
+        i=sel();
+        if i is not None and not _v27_annotation_to_dict(self.annotations[i]).get("locked"):
+            del self.annotations[i]; refresh(); self.redraw()
+    btns=ttk.Frame(body); btns.pack(side=tk.RIGHT,fill=tk.Y,padx=(8,0))
+    ttk.Button(btns,text="Edit",command=edit).pack(fill=tk.X,pady=2); ttk.Button(btns,text="Delete",command=delete).pack(fill=tk.X,pady=2)
+    refresh()
+PerfboardPlanner.v27_open_annotations_manager = _v27_open_annotations_manager
+
+
+def _v27_open_keepout_manager(self):
+    self._v27_ensure_fields()
+    win=tk.Toplevel(self); win.title("Keepout zones"); win.transient(self); win.geometry("560x340")
+    body=ttk.Frame(win,padding=8); body.pack(fill=tk.BOTH,expand=True)
+    lb=tk.Listbox(body,height=12); lb.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
+    def refresh():
+        lb.delete(0,tk.END)
+        for z0 in self.keepouts:
+            z=_v27_keepout_to_dict(z0); lb.insert(tk.END, f"{z['name']} | {z['side']} | R{z['row1']+1}C{z['col1']+1}–R{z['row2']+1}C{z['col2']+1}")
+    def sel():
+        s=lb.curselection(); return s[0] if s else None
+    def delete():
+        i=sel()
+        if i is not None and not _v27_keepout_to_dict(self.keepouts[i]).get("locked"):
+            del self.keepouts[i]; refresh(); self.redraw()
+    def toggle_lock():
+        i=sel()
+        if i is not None:
+            z=_v27_keepout_to_dict(self.keepouts[i]); z["locked"]=not z.get("locked",False); self.keepouts[i]=z; refresh(); self.redraw()
+    btns=ttk.Frame(body); btns.pack(side=tk.RIGHT,fill=tk.Y,padx=(8,0))
+    ttk.Button(btns,text="Toggle lock",command=toggle_lock).pack(fill=tk.X,pady=2); ttk.Button(btns,text="Delete",command=delete).pack(fill=tk.X,pady=2)
+    refresh()
+PerfboardPlanner.v27_open_keepout_manager = _v27_open_keepout_manager
+
+
+def _v27_snapshot_state(self):
+    self._v27_ensure_fields()
+    return {
+        "rows": int(self.rows), "cols": int(self.cols), "spacing": int(self.spacing),
+        "project_info": dict(self.project_info),
+        "components": [self._v27_component_to_dict(c) for c in self.components],
+        "wires": [self._v27_wire_to_dict(w) for w in self.wires],
+        "vias": [asdict(v) for v in self.vias],
+        "annotations": [_v27_annotation_to_dict(n) for n in self.annotations],
+        "keepouts": [_v27_keepout_to_dict(z) for z in self.keepouts],
+        "groups": dict(self.groups),
+    }
+PerfboardPlanner.snapshot_state = _v27_snapshot_state
+
+
+def _v27_component_from_dict(self, c):
+    pins = [ComponentPin(pin.get("name", ""), int(pin.get("row", 0)), int(pin.get("col", 0))) for pin in c.get("pins", [])]
+    jumpers = [ComponentJumper(j.get("pin_a", ""), j.get("pin_b", ""), j.get("color", "#00aaff")) for j in c.get("jumpers", [])]
+    normalized_pins = self.normalized_pins(pins, int(c.get("width", 1)), int(c.get("height", 1)))
+    comp = Component(
+        c.get("name", "Part"), int(c.get("row", 0)), int(c.get("col", 0)), int(c.get("width", 1)), int(c.get("height", 1)), c.get("color", "#ffcc66"),
+        side=c.get("side", "front"), rotation=self.normalized_angle(c.get("rotation", 0)),
+        show_name=bool(c.get("show_name", True)), show_pin_names=bool(c.get("show_pin_names", True)), pins=normalized_pins, jumpers=self.normalized_jumpers(jumpers, normalized_pins)
+    )
+    comp.component_type = c.get("component_type", c.get("type", "generic")) or "generic"
+    comp.value = c.get("value", "") or ""
+    comp.category = c.get("category", "Custom") or "Custom"
+    comp.locked = _v27_bool(c.get("locked", False))
+    comp.group = c.get("group", "") or ""
+    comp.orientation_note = c.get("orientation_note", "") or ""
+    return comp
+PerfboardPlanner.v27_component_from_dict = _v27_component_from_dict
+
+
+def _v27_restore_state(self, state):
+    self._v27_ensure_fields()
+    board = state.get("board", {}) if isinstance(state.get("board", {}), dict) else {}
+    self.rows = int(state.get("rows", board.get("rows", self.rows)))
+    self.cols = int(state.get("cols", board.get("cols", self.cols)))
+    self.spacing = int(state.get("spacing", board.get("spacing", self.spacing)))
+    self.project_info = dict(state.get("project_info", state.get("project", self.project_info)))
+    self.components = [self.v27_component_from_dict(c) for c in state.get("components", [])]
+    self.wires = []
+    for w in state.get("wires", []):
+        wire = Wire(w.get("name", ""), [tuple(p) for p in w.get("points", [])], w.get("color", "#d00000"), side=w.get("side", "front"), layer="main", lane=0)
+        wire.locked = _v27_bool(w.get("locked", False)); wire.group = w.get("group", "") or ""
+        self.wires.append(wire)
+    self.vias = [Via(int(v.get("row", 0)), int(v.get("col", 0)), v.get("name", ""), v.get("color", "#9c27b0")) for v in state.get("vias", [])]
+    self.annotations = [_v27_annotation_to_dict(n) for n in state.get("annotations", [])]
+    self.keepouts = [_v27_keepout_to_dict(z) for z in state.get("keepouts", [])]
+    self.groups = dict(state.get("groups", {}))
+    self.hidden_wire_colors.clear() if hasattr(self, "hidden_wire_colors") else None
+    self._wire_color_menu_signature = None
+    self.clear_selection()
+PerfboardPlanner.restore_state = _v27_restore_state
+
+
+def _v27_save_file(self):
+    self._v27_ensure_fields()
+    path = filedialog.asksaveasfilename(title="Save layout", defaultextension=".json", filetypes=[("JSON layout", "*.json"), ("All files", "*.*")])
+    if not path: return
+    data = self.snapshot_state()
+    data.update({"schema_version": V27_SCHEMA_VERSION, "app_version": V27_APP_VERSION, "version": V27_SCHEMA_VERSION, "board": {"rows": self.rows, "cols": self.cols, "spacing": self.spacing}})
+    with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
+    self.status.set(f"Saved {path}")
+PerfboardPlanner.save_file = _v27_save_file
+
+
+def _v27_open_file(self):
+    self._v27_ensure_fields()
+    path = filedialog.askopenfilename(title="Open layout", filetypes=[("JSON layout", "*.json"), ("All files", "*.*")])
+    if not path: return
+    try:
+        with open(path, "r", encoding="utf-8") as f: data=json.load(f)
+        self.restore_state(data)
+        title=self.project_info.get("title", "").strip()
+        self.title(f"Perfboard Planner — {title}" if title else "Perfboard Planner")
+        self._last_state = self.snapshot_state(); self.undo_stack.clear(); self.redo_stack.clear(); self.redraw(); self.status.set(f"Opened {path}")
+    except Exception as exc:
+        messagebox.showerror("Open failed", str(exc))
+PerfboardPlanner.open_file = _v27_open_file
+
+
+_v27_old_new_file = PerfboardPlanner.new_file
+def _v27_new_file(self):
+    if messagebox.askyesno("New file", "Start a new layout?"):
+        self.components.clear(); self.wires.clear(); self.vias.clear(); self.annotations=[]; self.keepouts=[]; self.project_info={"title":"","author":"","revision":"","notes":"","todo":"","changelog":""}
+        self.rows=30; self.cols=45; self.clear_selection(); self._last_state=self.snapshot_state(); self.undo_stack.clear(); self.redo_stack.clear(); self.title("Perfboard Planner"); self.redraw()
+PerfboardPlanner.new_file = _v27_new_file
+
+
+_v27_old_clear_board = PerfboardPlanner.clear_board
+def _v27_clear_board(self):
+    if messagebox.askyesno("Clear board", "Remove all components, wires, vias, annotations, and keepout zones?"):
+        self.components.clear(); self.wires.clear(); self.vias.clear(); self.annotations=[]; self.keepouts=[]; self.clear_selection(); self.redraw()
+PerfboardPlanner.clear_board = _v27_clear_board
+
+
+def _v27_swap_all_sides(self):
+    total=len(self.components)+len(self.wires)+len(self.annotations)+len([z for z in self.keepouts if _v27_keepout_to_dict(z)["side"] != "both"])
+    if total == 0:
+        self.status.set("There is nothing to swap."); return
+    if not messagebox.askyesno("Swap front/back sides", "Move every front-side item to the back, and every back-side item to the front?\n\nBoth-side keepout zones stay on both sides."):
+        return
+    def flip(s): return "front" if s == "back" else "back" if s == "front" else s
+    for comp in self.components: comp.side=flip(comp.side)
+    for wire in self.wires: wire.side=flip(wire.side)
+    for note in self.annotations: note["side"]=flip(note.get("side","front"))
+    for z in self.keepouts: z["side"]=flip(z.get("side","both"))
+    self.clear_selection(); self.status.set("Swapped front/back sides, including annotations and one-side keepouts."); self.redraw()
+PerfboardPlanner.swap_all_sides = _v27_swap_all_sides
+
+
+def _v27_save_selected_footprint(self):
+    self._v27_ensure_fields()
+    indices=self.component_indices_in_selection()
+    if not indices:
+        self.status.set("Select one component first, then save it as a footprint."); return
+    comp=self.components[indices[0]]
+    path=filedialog.asksaveasfilename(title="Save footprint", defaultextension=".json", filetypes=[("Perfboard footprint", "*.json"), ("All files", "*.*")])
+    if not path: return
+    data={"schema_version":2,"type":"perfboard_footprint","name":comp.name,"component_type":getattr(comp,"component_type","generic"),"value":getattr(comp,"value",""),"category":getattr(comp,"category","Custom"),"width":comp.width,"height":comp.height,"color":comp.color,"rotation":comp.rotation,"show_name":bool(getattr(comp,"show_name",True)),"show_pin_names":bool(getattr(comp,"show_pin_names",True)),"pins":[asdict(p) for p in self.normalized_pins(comp.pins, comp.width, comp.height)],"jumpers":[asdict(j) for j in self.normalized_jumpers(comp.jumpers, comp.pins)]}
+    with open(path,"w",encoding="utf-8") as f: json.dump(data,f,indent=2)
+    self.status.set(f"Footprint saved: {path}")
+PerfboardPlanner.save_selected_footprint = _v27_save_selected_footprint
+
+
+def _v27_load_footprint_template(self):
+    self._v27_ensure_fields()
+    path=filedialog.askopenfilename(title="Load footprint", filetypes=[("Perfboard footprint", "*.json"), ("All files", "*.*")])
+    if not path: return
+    try:
+        with open(path,"r",encoding="utf-8") as f: data=json.load(f)
+        w=int(data.get("width",1)); h=int(data.get("height",1))
+        pins=[ComponentPin(p.get("name",""),int(p.get("row",0)),int(p.get("col",0))) for p in data.get("pins",[])]
+        jumpers=[ComponentJumper(j.get("pin_a",""),j.get("pin_b",""),j.get("color","#00aaff")) for j in data.get("jumpers",[])]
+        normalized=self.normalized_pins(pins,w,h)
+        self.component_w.set(w); self.component_h.set(h); self.current_name.set(data.get("name","Part")); self.current_color.set(data.get("color","#ffcc66")); self.current_component_rotation.set(self.normalized_angle(data.get("rotation",0)))
+        self.current_component_type.set(data.get("component_type", data.get("type","generic"))); self.current_component_value.set(data.get("value","")); self.current_component_category.set(data.get("category","Custom"))
+        self.component_pin_template=self.copy_pins(normalized); self.component_jumper_template=self.normalized_jumpers(jumpers, normalized)
+        self.mode.set("component"); self._mode_changed(); self.status.set("Footprint loaded as new-component template.")
+    except Exception as exc: messagebox.showerror("Load footprint failed", str(exc))
+PerfboardPlanner.load_footprint_template = _v27_load_footprint_template
+
+
+_v27_old_init = PerfboardPlanner.__init__
+def _v27_init(self):
+    _v27_old_init(self)
+    self._v27_ensure_fields()
+    self.title("Perfboard Planner")
+    self.v27_add_ui()
+    self.redraw()
+PerfboardPlanner.__init__ = _v27_init
+
+
+def _v27_add_ui(self):
+    self._v27_ensure_fields()
+    # Rename bottom quickbar text label from Text to Note where possible.
+    def walk(widget):
+        for child in widget.winfo_children():
+            try:
+                if child.winfo_class() == "TButton" or child.winfo_class() == "TRadiobutton" or isinstance(child, ttk.Radiobutton):
+                    if str(child.cget("text")) == "Text": child.configure(text="Note")
+            except Exception:
+                pass
+            walk(child)
+    try: walk(self)
+    except Exception: pass
+
+    # Part tab: metadata for new components.
+    try:
+        ttk.Separator(self.part_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(self.part_tab, text="Component info", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        for label, var in [("Type", self.current_component_type), ("Value", self.current_component_value), ("Category", self.current_component_category)]:
+            ttk.Label(self.part_tab, text=label).pack(anchor="w", pady=(4,0))
+            ttk.Entry(self.part_tab, textvariable=var).pack(fill=tk.X)
+        ttk.Button(self.part_tab, text="Component library…", command=self.v27_open_component_library).pack(fill=tk.X, pady=(6,2))
+    except Exception:
+        pass
+
+    # Tool tab additions.
+    try:
+        ttk.Separator(self.tool_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(self.tool_tab, text="Planning tools", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(self.tool_tab, text="Warning list…", command=self.v27_open_warning_list).pack(fill=tk.X, pady=(5,2))
+        ttk.Button(self.tool_tab, text="Bill of materials…", command=self.v27_open_bom).pack(fill=tk.X, pady=2)
+        ttk.Button(self.tool_tab, text="Project info…", command=self.v27_open_project_info).pack(fill=tk.X, pady=2)
+        ttk.Button(self.tool_tab, text="Annotation mode", command=lambda: (self.mode.set("label"), self._mode_changed())).pack(fill=tk.X, pady=(6,2))
+        ttk.Button(self.tool_tab, text="Keepout mode", command=lambda: (self.mode.set("keepout"), self._mode_changed())).pack(fill=tk.X, pady=2)
+        ttk.Button(self.tool_tab, text="Annotations…", command=self.v27_open_annotations_manager).pack(fill=tk.X, pady=2)
+        ttk.Button(self.tool_tab, text="Keepout zones…", command=self.v27_open_keepout_manager).pack(fill=tk.X, pady=2)
+        ttk.Separator(self.tool_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(self.tool_tab, text="Lock / group", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        row=ttk.Frame(self.tool_tab); row.pack(fill=tk.X, pady=(5,0))
+        ttk.Button(row, text="Lock", command=lambda: self.v27_set_lock_selected(True)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(row, text="Unlock", command=lambda: self.v27_set_lock_selected(False)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4,0))
+        ttk.Button(self.tool_tab, text="Assign group/module…", command=self.v27_assign_group_selected).pack(fill=tk.X, pady=(5,2))
+        ttk.Button(self.tool_tab, text="Clear group", command=self.v27_clear_group_selected).pack(fill=tk.X, pady=2)
+    except Exception:
+        pass
+
+    try:
+        ttk.Separator(self.wire_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(self.wire_tab, text="Wire routing", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(self.wire_tab, text="Suggest route between holes…", command=self.v27_suggest_route_between_holes).pack(fill=tk.X, pady=(5,2))
+        ttk.Label(self.wire_tab, text="Existing wires: drag endpoint/bend dots directly, or double-click a wire to insert/remove/edit points.", wraplength=270, justify=tk.LEFT).pack(anchor="w", pady=(4,0))
+    except Exception:
+        pass
+
+    try:
+        ttk.Separator(self.file_tab).pack(fill=tk.X, pady=10)
+        ttk.Label(self.file_tab, text="Project / export", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Button(self.file_tab, text="Project info…", command=self.v27_open_project_info).pack(fill=tk.X, pady=(5,2))
+        ttk.Button(self.file_tab, text="Bill of materials…", command=self.v27_open_bom).pack(fill=tk.X, pady=2)
+    except Exception:
+        pass
+
+PerfboardPlanner.v27_add_ui = _v27_add_ui
+
 if __name__ == "__main__":
     app = PerfboardPlanner()
     app.mainloop()
