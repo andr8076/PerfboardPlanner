@@ -91,6 +91,10 @@ class PerfboardPlanner(tk.Tk):
         self.selected_index: Optional[int] = None
         self.temp_wire_points: List[Tuple[int, int]] = []
         self.preview_line_id: Optional[int] = None
+        # Calculated on every redraw. Used only for visual separation of
+        # overlapping wire runs; the saved wire points remain on real holes.
+        self._wire_unit_lanes: Dict[Tuple[str, int, Tuple[Tuple[int, int], Tuple[int, int]]], int] = {}
+
 
         self.mode_styles = {
             "select": {
@@ -106,7 +110,7 @@ class PerfboardPlanner(tk.Tk):
             "wire": {
                 "label": "DRAW WIRE",
                 "color": "#b00020",
-                "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire. Overlapping wires are separated automatically; crossings get markers so you can tell jump-overs from real junctions.",
+                "hint": "Click a hole or component pin, then click the end point. Shift+click adds bend points. Right-click or Enter finishes the current wire. Only the overlapping parts of wires are separated automatically. A small hop marker means crossing without connection; a small solder dot means shared-hole connection.",
             },
             "label": {
                 "label": "TEXT LABEL",
@@ -1809,111 +1813,193 @@ class PerfboardPlanner(tk.Tk):
 
     @staticmethod
     def clamp_wire_lane(value) -> int:
+        # Kept for compatibility with older JSON files. Manual lanes are no
+        # longer part of the UI; v16 calculates per-segment offsets automatically.
         try:
-            return max(-4, min(4, int(value)))
+            return max(-8, min(8, int(value)))
         except Exception:
             return 0
 
     def current_wire_lane_value(self) -> int:
-        return self.clamp_wire_lane(self.current_wire_lane.get())
+        return 0
 
     @staticmethod
     def wire_lane_value(wire: Wire) -> int:
         return PerfboardPlanner.clamp_wire_lane(getattr(wire, "lane", 0))
 
     def wire_lane_offset(self, wire_or_lane) -> float:
-        lane = self.wire_lane_value(wire_or_lane) if isinstance(wire_or_lane, Wire) else self.clamp_wire_lane(wire_or_lane)
-        if lane == 0:
-            return 0.0
-        # Slightly wider than a normal wire so adjacent lanes remain readable.
-        return lane * max(6.0, 8.0 * self.zoom)
+        # Compatibility shim for a few older call sites. The new renderer does
+        # not offset the whole wire anymore; only shared unit-runs are offset.
+        return 0.0
 
     @staticmethod
     def offset_polyline_points(points_xy: List[Tuple[float, float]], offset: float) -> List[Tuple[float, float]]:
-        if not points_xy or abs(offset) < 0.001:
-            return list(points_xy)
-        if len(points_xy) == 1:
-            x, y = points_xy[0]
-            return [(x, y)]
+        # Compatibility shim. Whole-polyline offsetting caused bad bend and
+        # endpoint artefacts, so v16 keeps this as a no-op.
+        return list(points_xy)
 
-        normals: List[Tuple[float, float]] = []
-        for (ax, ay), (bx, by) in zip(points_xy, points_xy[1:]):
-            dx = bx - ax
-            dy = by - ay
-            length = (dx * dx + dy * dy) ** 0.5
-            if length <= 0.001:
-                normals.append((0.0, 0.0))
-            else:
-                normals.append((-dy / length, dx / length))
+    @staticmethod
+    def _unit_lane_choices(count: int) -> List[int]:
+        if count <= 1:
+            return [0]
+        # For two wires, use -1 and +1 so neither one hides the other on the
+        # original centerline. For odd counts, keep one in the center.
+        if count % 2:
+            half = count // 2
+            return [0] + [value for pair in ((n, -n) for n in range(1, half + 1)) for value in pair]
+        half = count // 2
+        return [value for n in range(1, half + 1) for value in (-n, n)]
 
-        result: List[Tuple[float, float]] = []
-        for idx, (x, y) in enumerate(points_xy):
-            if idx == 0:
-                nx, ny = normals[0]
-            elif idx == len(points_xy) - 1:
-                nx, ny = normals[-1]
-            else:
-                ax, ay = normals[idx - 1]
-                bx, by = normals[idx]
-                nx, ny = ax + bx, ay + by
-                length = (nx * nx + ny * ny) ** 0.5
-                if length <= 0.001:
-                    nx, ny = bx, by
-                else:
-                    nx, ny = nx / length, ny / length
-            result.append((x + nx * offset, y + ny * offset))
-        return result
+    @staticmethod
+    def _unit_segment_key(a: Tuple[int, int], b: Tuple[int, int]) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        return tuple(sorted(((int(a[0]), int(a[1])), (int(b[0]), int(b[1])))))  # type: ignore[return-value]
+
+    def wire_unit_entries(self, wire: Wire) -> List[Dict[str, Any]]:
+        """Return ordered one-hole spans for a wire.
+
+        Horizontal/vertical runs are split into one-hole spans so overlaps can
+        be handled only where they really happen. Diagonal runs are preserved as
+        one span; they still draw and select correctly, but they are not treated
+        as perfboard-style parallel tracks.
+        """
+        entries: List[Dict[str, Any]] = []
+        pts = [(int(r), int(c)) for r, c in wire.points]
+        for (r1, c1), (r2, c2) in zip(pts, pts[1:]):
+            if r1 == r2 and c1 != c2:
+                step = 1 if c2 > c1 else -1
+                for c in range(c1, c2, step):
+                    a = (r1, c)
+                    b = (r1, c + step)
+                    entries.append({"a": a, "b": b, "key": self._unit_segment_key(a, b), "orthogonal": True})
+            elif c1 == c2 and r1 != r2:
+                step = 1 if r2 > r1 else -1
+                for r in range(r1, r2, step):
+                    a = (r, c1)
+                    b = (r + step, c1)
+                    entries.append({"a": a, "b": b, "key": self._unit_segment_key(a, b), "orthogonal": True})
+            elif (r1, c1) != (r2, c2):
+                a = (r1, c1)
+                b = (r2, c2)
+                entries.append({"a": a, "b": b, "key": self._unit_segment_key(a, b), "orthogonal": False})
+        return entries
+
+    def wire_unit_segments(self, wire: Wire) -> set:
+        return {entry["key"] for entry in self.wire_unit_entries(wire) if entry.get("orthogonal")}
+
+    def auto_stagger_overlapping_wires(self, event=None):
+        # Manual command kept as a harmless refresh action for old shortcuts.
+        self.recompute_auto_wire_spacing()
+        self.status.set("Wire overlaps are handled automatically per segment.")
+        self.redraw()
+        return "break"
 
     def recompute_auto_wire_spacing(self):
-        """Automatically separate same-side wires that share the same board run.
+        """Calculate visual-only offsets for shared unit wire runs.
 
-        The saved connection points stay on the actual holes. The lane value is
-        now only an internal display offset, recalculated from the current
-        layout, so the user does not have to manage lanes manually.
+        v15 offset the whole polyline. That made bends, endpoints, and nearby
+        component pins drift too far. v16 offsets only the exact one-hole spans
+        where more than one same-side wire uses the same path.
         """
+        self._wire_unit_lanes = {}
         for wire in self.wires:
             wire.lane = 0
 
         for side in ("front", "back"):
-            indexed = [(i, self.wires[i]) for i in range(len(self.wires)) if self.wires[i].side == side]
-            if len(indexed) < 2:
+            memberships: Dict[Tuple[Tuple[int, int], Tuple[int, int]], List[int]] = {}
+            for i, wire in enumerate(self.wires):
+                if wire.side != side:
+                    continue
+                seen_for_wire = set()
+                for entry in self.wire_unit_entries(wire):
+                    if not entry.get("orthogonal"):
+                        continue
+                    key = entry["key"]
+                    if key in seen_for_wire:
+                        continue
+                    seen_for_wire.add(key)
+                    memberships.setdefault(key, []).append(i)
+
+            for key, indices in memberships.items():
+                unique_indices = sorted(set(indices))
+                if len(unique_indices) <= 1:
+                    continue
+                lanes = self._unit_lane_choices(len(unique_indices))
+                for wire_index, lane in zip(unique_indices, lanes):
+                    self._wire_unit_lanes[(side, wire_index, key)] = lane
+
+    def wire_parallel_offset_px(self) -> float:
+        # Wide enough that two 5px wires do not visually merge, but not so wide
+        # that they look like they jumped to another row/column.
+        return max(5.0, min(9.0, 0.32 * self.scaled_spacing()))
+
+    def _offset_grid_span_xy(self, a: Tuple[int, int], b: Tuple[int, int], lane: int) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        ax, ay = self.grid_to_xy(*a)
+        bx, by = self.grid_to_xy(*b)
+        if lane == 0:
+            return (ax, ay), (bx, by)
+
+        amount = lane * self.wire_parallel_offset_px()
+        ar, ac = a
+        br, bc = b
+        if ar == br:
+            # Horizontal board run: separate vertically.
+            nx, ny = 0.0, 1.0
+        elif ac == bc:
+            # Vertical board run: separate horizontally.
+            nx, ny = -1.0, 0.0
+        else:
+            # Diagonal/non-orthogonal spans are left centered.
+            nx, ny = 0.0, 0.0
+        return (ax + nx * amount, ay + ny * amount), (bx + nx * amount, by + ny * amount)
+
+    @staticmethod
+    def _same_xy(a: Tuple[float, float], b: Tuple[float, float], eps: float = 0.5) -> bool:
+        return abs(a[0] - b[0]) <= eps and abs(a[1] - b[1]) <= eps
+
+    def wire_visual_path_points(self, wire_index: int, wire: Wire) -> List[Tuple[float, float]]:
+        if len(wire.points) < 2:
+            return [self.grid_to_xy(row, col) for row, col in wire.points]
+
+        result: List[Tuple[float, float]] = []
+        side = wire.side
+        for segment_start, segment_end in zip(wire.points, wire.points[1:]):
+            temp_wire = Wire("", [tuple(segment_start), tuple(segment_end)], wire.color, side=wire.side)
+            entries = self.wire_unit_entries(temp_wire)
+            if not entries:
                 continue
 
-            segment_sets = {i: self.wire_unit_segments(wire) for i, wire in indexed}
-            conflicts = {i: set() for i, _ in indexed}
-            for pos, (i, _) in enumerate(indexed):
-                for j, _ in indexed[pos + 1:]:
-                    if segment_sets[i] and segment_sets[i].intersection(segment_sets[j]):
-                        conflicts[i].add(j)
-                        conflicts[j].add(i)
+            actual_start_xy = self.grid_to_xy(*segment_start)
+            actual_end_xy = self.grid_to_xy(*segment_end)
+            if not result:
+                result.append(actual_start_xy)
+            elif not self._same_xy(result[-1], actual_start_xy):
+                result.append(actual_start_xy)
 
-            active = {i: neighbours for i, neighbours in conflicts.items() if neighbours}
-            if not active:
+            for entry in entries:
+                key = entry["key"]
+                lane = self._wire_unit_lanes.get((side, wire_index, key), 0)
+                start_xy, end_xy = self._offset_grid_span_xy(entry["a"], entry["b"], lane if entry.get("orthogonal") else 0)
+                if not self._same_xy(result[-1], start_xy):
+                    result.append(start_xy)
+                if not self._same_xy(result[-1], end_xy):
+                    result.append(end_xy)
+
+            if not self._same_xy(result[-1], actual_end_xy):
+                result.append(actual_end_xy)
+
+        return result
+
+    def wire_visual_segments(self, wire_index: int, wire: Wire) -> List[Tuple[Tuple[float, float], Tuple[float, float], bool]]:
+        path = self.wire_visual_path_points(wire_index, wire)
+        result: List[Tuple[Tuple[float, float], Tuple[float, float], bool]] = []
+        actual_holes = {self.grid_to_xy(row, col) for row, col in wire.points}
+        for a, b in zip(path, path[1:]):
+            if self._same_xy(a, b):
                 continue
-
-            # Keep the most important wire centered when possible, then push
-            # other conflicting wires to alternating sides. This is automatic,
-            # but it still uses the old lane field internally for compatibility.
-            lane_choices = [0, 1, -1, 2, -2, 3, -3, 4, -4]
-            assigned: Dict[int, int] = {}
-            for i in sorted(active, key=lambda idx: len(active[idx]), reverse=True):
-                used = {assigned[j] for j in active[i] if j in assigned}
-                for lane in lane_choices:
-                    if lane not in used:
-                        assigned[i] = lane
-                        break
-                else:
-                    assigned[i] = 4
-
-            for i, lane in assigned.items():
-                self.wires[i].lane = lane
-
-    def wire_visual_segments(self, wire: Wire) -> List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[int, int], Tuple[int, int]]]:
-        points_xy = [self.grid_to_xy(row, col) for row, col in wire.points]
-        visual_xy = self.offset_polyline_points(points_xy, self.wire_lane_offset(wire))
-        result = []
-        for a_xy, b_xy, a_grid, b_grid in zip(visual_xy, visual_xy[1:], wire.points, wire.points[1:]):
-            result.append((a_xy, b_xy, (int(a_grid[0]), int(a_grid[1])), (int(b_grid[0]), int(b_grid[1]))))
+            # Connector doglegs are the short links from real holes into a
+            # visually separated track. Crossing markers should ignore them.
+            connector = (a in actual_holes) or (b in actual_holes)
+            result.append((a, b, connector))
         return result
 
     @staticmethod
@@ -1944,22 +2030,32 @@ class PerfboardPlanner(tk.Tk):
         return {point: indices for point, indices in holes.items() if len(indices) > 1}
 
     def draw_wire_connection_markers(self, side: str):
-        # Solid dots mean a true shared hole/junction. Bridge symbols mean a
-        # visual crossing only, with no electrical connection implied.
+        # Solid solder dots mean a true shared hole/junction. Bridge symbols mean
+        # a visual crossing only, with no electrical connection implied.
         junctions = self.explicit_wire_junctions(side)
         junction_xy = []
         for point, indices in junctions.items():
             x, y = self.grid_to_xy(*point)
             junction_xy.append((x, y))
-            r = max(4, 6 * self.zoom)
+            r = max(3, 4.3 * self.zoom)
             self.canvas.create_oval(
                 x - r,
                 y - r,
                 x + r,
                 y + r,
+                fill="#ffffff",
+                outline="#111111",
+                width=max(1, round(1.5 * self.zoom)),
+                tags=("wire_junction",),
+            )
+            inner = max(1.5, 2.0 * self.zoom)
+            self.canvas.create_oval(
+                x - inner,
+                y - inner,
+                x + inner,
+                y + inner,
                 fill="#111111",
-                outline="#ffffff",
-                width=max(1, round(2 * self.zoom)),
+                outline="",
                 tags=("wire_junction",),
             )
 
@@ -1967,31 +2063,34 @@ class PerfboardPlanner(tk.Tk):
         if len(visible) < 2:
             return
 
-        segments = {i: self.wire_visual_segments(wire) for i, wire in visible}
+        segments = {i: self.wire_visual_segments(i, wire) for i, wire in visible}
         markers = []
         seen = set()
-        skip_radius = max(3.0, 4.0 * self.zoom)
+        skip_radius = max(5.0, 6.0 * self.zoom)
         for pos, (i, wire_a) in enumerate(visible):
             for j, wire_b in visible[pos + 1:]:
                 for seg_a in segments[i]:
-                    a1, a2, _, _ = seg_a
+                    a1, a2, a_connector = seg_a
+                    if a_connector:
+                        continue
                     for seg_b in segments[j]:
-                        b1, b2, _, _ = seg_b
+                        b1, b2, b_connector = seg_b
+                        if b_connector:
+                            continue
                         hit = self.segment_intersection_xy(a1, a2, b1, b2)
                         if hit is None:
                             continue
                         x, y, t, u = hit
                         if any(((x - jx) ** 2 + (y - jy) ** 2) ** 0.5 <= skip_radius for jx, jy in junction_xy):
                             continue
-                        # Ignore pure end-to-end touches; those are either real
-                        # junctions above or simply adjacent wire endpoints.
-                        endpoint_touch = (t < 0.02 or t > 0.98 or u < 0.02 or u > 0.98)
+                        endpoint_touch = (t < 0.05 or t > 0.95 or u < 0.05 or u > 0.95)
                         if endpoint_touch:
                             continue
                         key = (round(x, 1), round(y, 1), min(i, j), max(i, j))
                         if key in seen:
                             continue
                         seen.add(key)
+                        # Later-created wire is shown as the one that hops over.
                         top_index, top_segment = (j, seg_b) if j > i else (i, seg_a)
                         markers.append((x, y, self.wires[top_index], top_segment))
 
@@ -1999,35 +2098,35 @@ class PerfboardPlanner(tk.Tk):
             self.draw_wire_bridge_marker(x, y, top_wire, top_segment)
 
     def draw_wire_bridge_marker(self, x: float, y: float, wire: Wire, segment):
-        (ax, ay), (bx, by), _, _ = segment
+        (ax, ay), (bx, by), _ = segment
         horizontal = abs(bx - ax) >= abs(by - ay)
-        r = max(6, 9 * self.zoom)
-        cover = max(5, 8 * self.zoom)
-        board_green = "#117a35"
-        # Cover the straight crossing point, then redraw a small curved bridge
-        # in the top wire's color. That makes it visually different from a
-        # solder/junction dot.
-        self.canvas.create_oval(
-            x - cover,
-            y - cover,
-            x + cover,
-            y + cover,
-            fill=board_green,
-            outline="#e8e8e8",
-            width=max(1, round(1 * self.zoom)),
+        r_x = max(7, 9 * self.zoom)
+        r_y = max(5, 7 * self.zoom)
+        # Draw only a small hop symbol. The old filled oval was too visually
+        # aggressive and could look like a green blob over the circuit.
+        if horizontal:
+            bbox = (x - r_x, y - r_y, x + r_x, y + r_y)
+            start = 0
+        else:
+            bbox = (x - r_y, y - r_x, x + r_y, y + r_x)
+            start = 90
+        base_width = max(3, round(5 * self.zoom))
+        self.canvas.create_arc(
+            *bbox,
+            start=start,
+            extent=180,
+            style=tk.ARC,
+            outline="#ffffff",
+            width=base_width + max(2, round(3 * self.zoom)),
             tags=("wire_bridge",),
         )
-        start = 0 if horizontal else 90
         self.canvas.create_arc(
-            x - r,
-            y - r,
-            x + r,
-            y + r,
+            *bbox,
             start=start,
             extent=180,
             style=tk.ARC,
             outline=wire.color,
-            width=max(2, round(5 * self.zoom)),
+            width=base_width,
             tags=("wire_bridge",),
         )
 
@@ -2035,14 +2134,12 @@ class PerfboardPlanner(tk.Tk):
         for i, wire in enumerate(self.wires):
             if side is not None and wire.side != side:
                 continue
-            points_xy = [self.grid_to_xy(row, col) for row, col in wire.points]
             selected = (not ghost) and self.selected_kind == "wire" and self.selected_index == i
             width = max(1, round((4 if ghost else (7 if selected else 5)) * self.zoom))
-            lane = self.wire_lane_value(wire)
-            visual_xy = self.offset_polyline_points(points_xy, self.wire_lane_offset(lane))
+            path = self.wire_visual_path_points(i, wire)
 
-            if len(points_xy) >= 2:
-                flat = [value for xy in visual_xy for value in xy]
+            if len(path) >= 2:
+                flat = [value for xy in path for value in xy]
                 if ghost:
                     self.canvas.create_line(
                         *flat,
@@ -2072,19 +2169,9 @@ class PerfboardPlanner(tk.Tk):
                         tags=("wire", f"wire:{i}"),
                     )
 
-                    # Offset wires still belong to the real snapped holes. These
-                    # short landing marks make that relationship visible.
-                    if lane != 0:
-                        landing_width = max(1, round(2 * self.zoom))
-                        for (actual_x, actual_y), (visual_x, visual_y) in zip(points_xy, visual_xy):
-                            self.canvas.create_line(
-                                actual_x, actual_y, visual_x, visual_y,
-                                fill=wire.color,
-                                width=landing_width,
-                                capstyle=tk.ROUND,
-                                tags=("wire", f"wire:{i}"),
-                            )
-
+            # Draw the actual snapped control/connection holes on top of the
+            # routed visual path. This keeps endpoint meaning clear even when a
+            # shared span is offset beside the hole centerline.
             for row, col in wire.points:
                 x, y = self.grid_to_xy(row, col)
                 r = max(2, (4 if ghost else 5) * self.zoom)
@@ -2092,8 +2179,8 @@ class PerfboardPlanner(tk.Tk):
                     self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="", outline=wire.color, width=max(1, round(1 * self.zoom)), tags=("ghost_wire", f"ghost_wire:{i}"))
                 else:
                     self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=wire.color, outline="", tags=("wire", f"wire:{i}"))
-            if wire.name and len(visual_xy) >= 2 and not ghost:
-                lx, ly = visual_xy[len(visual_xy) // 2]
+            if wire.name and len(path) >= 2 and not ghost:
+                lx, ly = path[len(path) // 2]
                 self.canvas.create_text(lx + 8 * self.zoom, ly - 10 * self.zoom, text=wire.name, anchor="w", fill="#111111", font=("TkDefaultFont", max(6, round(9 * self.zoom))), tags=("wire", f"wire:{i}"))
 
     def draw_opposite_connection_points(self, side: str):
@@ -2127,7 +2214,7 @@ class PerfboardPlanner(tk.Tk):
         if not self.temp_wire_points:
             return
         points_xy = [self.grid_to_xy(row, col) for row, col in self.temp_wire_points]
-        visual_xy = self.offset_polyline_points(points_xy, self.wire_lane_offset(self.current_wire_lane_value()))
+        visual_xy = list(points_xy)
         if len(points_xy) == 1:
             x, y = points_xy[0]
             r = max(3, 6 * self.zoom)
@@ -2135,9 +2222,6 @@ class PerfboardPlanner(tk.Tk):
         else:
             flat = [value for xy in visual_xy for value in xy]
             self.canvas.create_line(*flat, fill=self.current_wire_color.get(), width=max(2, round(4 * self.zoom)), capstyle=tk.ROUND, joinstyle=tk.ROUND, dash=(max(2, round(8 * self.zoom)), max(2, round(4 * self.zoom))))
-            if self.current_wire_lane_value() != 0:
-                for (actual_x, actual_y), (visual_x, visual_y) in zip(points_xy, visual_xy):
-                    self.canvas.create_line(actual_x, actual_y, visual_x, visual_y, fill=self.current_wire_color.get(), width=max(1, round(2 * self.zoom)), capstyle=tk.ROUND)
             for x, y in points_xy:
                 r = max(3, 5 * self.zoom)
                 self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=self.current_wire_color.get(), outline="")
@@ -2161,9 +2245,7 @@ class PerfboardPlanner(tk.Tk):
             wire = self.wires[i]
             if wire.side != side:
                 continue
-            pts = [self.grid_to_xy(row, col) for row, col in wire.points]
-            visual_pts = self.offset_polyline_points(pts, self.wire_lane_offset(wire))
-            for a, b in zip(visual_pts, visual_pts[1:]):
+            for a, b, _connector in self.wire_visual_segments(i, wire):
                 if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= max(6, 8 * self.zoom):
                     return i
         return None
