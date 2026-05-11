@@ -65,20 +65,16 @@ class PerfboardPlanner(tk.Tk):
         # current_side. The other side can be drawn as a ghost/see-through
         # layer so holes, pins, and components still line up physically.
         self.current_side = tk.StringVar(value="front")
-        self.show_opposite_layer = tk.BooleanVar(value=True)
-        self.show_opposite_connections = tk.BooleanVar(value=True)
+        self.show_opposite_layer = tk.BooleanVar(value=True)      # opposite-side component bodies
+        self.show_opposite_pins = tk.BooleanVar(value=True)       # opposite-side component pins / connection points
+        self.show_opposite_wires = tk.BooleanVar(value=True)      # opposite-side wires
 
         self.mode = tk.StringVar(value="select")
         self.current_color = tk.StringVar(value="#ffcc66")
         self.current_wire_color = tk.StringVar(value="#d00000")
-        self.wire_layers = [("main", "Main"), ("aux", "Aux")]
-        self.current_wire_layer = tk.StringVar(value="main")
-        self.show_wire_layer_main = tk.BooleanVar(value=True)
-        self.show_wire_layer_aux = tk.BooleanVar(value=True)
-        self.wire_layer_visibility = {
-            "main": self.show_wire_layer_main,
-            "aux": self.show_wire_layer_aux,
-        }
+        # Wire layers used to be Main/Aux. That turned out to be the wrong
+        # model: wires are now a normal editable item on each board side, and
+        # the opposite-side wires have their own ghost visibility toggle.
         self.current_name = tk.StringVar(value="Part")
         self.component_w = tk.IntVar(value=4)
         self.component_h = tk.IntVar(value=2)
@@ -348,18 +344,12 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(wire_tab, text="New wires", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         ttk.Button(wire_tab, text="Wire color", command=self.choose_wire_color).pack(fill=tk.X, pady=(5, 2))
 
-        ttk.Label(wire_tab, text="Wire layer").pack(anchor="w", pady=(8, 2))
-        wire_layer_row = ttk.Frame(wire_tab)
-        wire_layer_row.pack(fill=tk.X)
-        for layer_value, layer_text in self.wire_layers:
-            ttk.Radiobutton(
-                wire_layer_row,
-                text=layer_text,
-                variable=self.current_wire_layer,
-                value=layer_value,
-                style="Toolbutton",
-                width=8,
-            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Label(
+            wire_tab,
+            text="New wires use this color and are placed on the active board side.",
+            justify=tk.LEFT,
+            wraplength=270,
+        ).pack(anchor="w", pady=(6, 0))
 
         ttk.Separator(wire_tab).pack(fill=tk.X, pady=10)
         ttk.Label(wire_tab, text="Selected wire", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
@@ -367,7 +357,7 @@ class PerfboardPlanner(tk.Tk):
         ttk.Button(wire_tab, text="Apply current color", command=self.apply_current_wire_color_to_selected).pack(fill=tk.X, pady=2)
         ttk.Label(
             wire_tab,
-            text="Tip: double-click a wire in Select mode to edit its name, color, side, and layer.",
+            text="Tip: double-click a wire in Select mode to edit its name, color, and side.",
             justify=tk.LEFT,
             wraplength=270,
         ).pack(anchor="w", pady=(8, 0))
@@ -416,28 +406,21 @@ class PerfboardPlanner(tk.Tk):
         ttk.Button(board_row, text="Clear", command=self.clear_board).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
         ttk.Separator(view_tab).pack(fill=tk.X, pady=10)
-        ttk.Label(view_tab, text="Wire layers", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        wire_visible_row = ttk.Frame(view_tab)
-        wire_visible_row.pack(anchor="w", fill=tk.X, pady=(5, 0))
-        ttk.Checkbutton(
-            wire_visible_row,
-            text="Main",
-            variable=self.show_wire_layer_main,
-            command=self.redraw,
-            style="Toolbutton",
-            width=8,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        ttk.Checkbutton(
-            wire_visible_row,
-            text="Aux",
-            variable=self.show_wire_layer_aux,
-            command=self.redraw,
-            style="Toolbutton",
-            width=8,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(view_tab, text="Other side ghost layers", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ghost_visible_row = ttk.Frame(view_tab)
+        ghost_visible_row.pack(anchor="w", fill=tk.X, pady=(5, 0))
+        for text_label, var in [("Parts", self.show_opposite_layer), ("Pins", self.show_opposite_pins), ("Wires", self.show_opposite_wires)]:
+            ttk.Checkbutton(
+                ghost_visible_row,
+                text=text_label,
+                variable=var,
+                command=self.toggle_layer_display,
+                style="Toolbutton",
+                width=8,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         ttk.Label(
             view_tab,
-            text="Each wire belongs to one wire layer. Hidden wire layers are not drawn or selectable.",
+            text="These only control the see-through view of the opposite side. They do not create extra wire categories.",
             justify=tk.LEFT,
             wraplength=270,
         ).pack(anchor="w", pady=(6, 0))
@@ -511,7 +494,7 @@ class PerfboardPlanner(tk.Tk):
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         ttk.Checkbutton(
             layer_tabs,
-            text="Ghost",
+            text="Parts",
             variable=self.show_opposite_layer,
             command=self.toggle_layer_display,
             style="Toolbutton",
@@ -520,7 +503,15 @@ class PerfboardPlanner(tk.Tk):
         ttk.Checkbutton(
             layer_tabs,
             text="Pins",
-            variable=self.show_opposite_connections,
+            variable=self.show_opposite_pins,
+            command=self.toggle_layer_display,
+            style="Toolbutton",
+            width=7,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Checkbutton(
+            layer_tabs,
+            text="Wires",
+            variable=self.show_opposite_wires,
             command=self.toggle_layer_display,
             style="Toolbutton",
             width=7,
@@ -668,7 +659,6 @@ class PerfboardPlanner(tk.Tk):
         name_var = tk.StringVar(value=wire.name)
         color_var = tk.StringVar(value=wire.color)
         side_var = tk.StringVar(value=wire.side)
-        layer_var = tk.StringVar(value=getattr(wire, "layer", "main") or "main")
 
         body = ttk.Frame(win, padding=10)
         body.pack(fill=tk.BOTH, expand=True)
@@ -683,15 +673,9 @@ class PerfboardPlanner(tk.Tk):
         ttk.Radiobutton(side_frame, text="Front", variable=side_var, value="front").pack(side=tk.LEFT)
         ttk.Radiobutton(side_frame, text="Back", variable=side_var, value="back").pack(side=tk.LEFT, padx=(12, 0))
 
-        ttk.Label(body, text="Layer").grid(row=3, column=0, sticky="w", pady=2)
-        layer_frame = ttk.Frame(body)
-        layer_frame.grid(row=3, column=1, columnspan=2, sticky="w", pady=2)
-        for layer_value, layer_text in self.wire_layers:
-            ttk.Radiobutton(layer_frame, text=layer_text, variable=layer_var, value=layer_value).pack(side=tk.LEFT, padx=(0, 8))
-
-        ttk.Label(body, text="Color").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Label(body, text="Color").grid(row=3, column=0, sticky="w", pady=2)
         color_preview = tk.Label(body, textvariable=color_var, bg=color_var.get(), fg="#111111", width=12, relief=tk.SUNKEN)
-        color_preview.grid(row=4, column=1, sticky="w", pady=2)
+        color_preview.grid(row=3, column=1, sticky="w", pady=2)
 
         def choose_color():
             color = colorchooser.askcolor(color=color_var.get(), title="Choose wire color", parent=win)
@@ -699,11 +683,11 @@ class PerfboardPlanner(tk.Tk):
                 color_var.set(color[1])
                 color_preview.configure(bg=color[1])
 
-        ttk.Button(body, text="Choose…", command=choose_color).grid(row=4, column=2, sticky="ew", padx=(6, 0), pady=2)
+        ttk.Button(body, text="Choose…", command=choose_color).grid(row=3, column=2, sticky="ew", padx=(6, 0), pady=2)
 
         points_text = " → ".join(f"R{row + 1}C{col + 1}" for row, col in wire.points)
-        ttk.Label(body, text="Points").grid(row=5, column=0, sticky="nw", pady=(8, 2))
-        ttk.Label(body, text=points_text or "No points", wraplength=280, justify=tk.LEFT).grid(row=5, column=1, columnspan=2, sticky="w", pady=(8, 2))
+        ttk.Label(body, text="Points").grid(row=4, column=0, sticky="nw", pady=(8, 2))
+        ttk.Label(body, text=points_text or "No points", wraplength=280, justify=tk.LEFT).grid(row=4, column=1, columnspan=2, sticky="w", pady=(8, 2))
 
         def apply_changes():
             if not (0 <= wire_index < len(self.wires)):
@@ -714,11 +698,10 @@ class PerfboardPlanner(tk.Tk):
             edited.name = name_var.get().strip()
             edited.color = color_var.get() or "#d00000"
             edited.side = side_var.get() if side_var.get() in {"front", "back"} else self.current_side.get()
-            edited.layer = layer_var.get() if layer_var.get() in dict(self.wire_layers) else "main"
+            edited.layer = "main"
             self.selected_kind = "wire"
             self.selected_index = wire_index
             self.current_side.set(edited.side)
-            self.current_wire_layer.set(edited.layer)
             self.status.set("Updated wire.")
             win.destroy()
             self.redraw()
@@ -741,8 +724,8 @@ class PerfboardPlanner(tk.Tk):
             return "break"
         wire = self.wires[self.selected_index]
         wire.color = self.current_wire_color.get()
-        wire.layer = self.current_wire_layer.get()
-        self.status.set("Applied current wire color/layer to selected wire.")
+        wire.layer = "main"
+        self.status.set("Applied current wire color to selected wire.")
         self.redraw()
         return "break"
 
@@ -1260,11 +1243,13 @@ class PerfboardPlanner(tk.Tk):
         return "Front" if side == "front" else "Back"
 
     def wire_layer_visible(self, layer: str) -> bool:
-        var = self.wire_layer_visibility.get(layer)
-        return True if var is None else bool(var.get())
+        # Compatibility with older JSON files that may contain a legacy
+        # Main/Aux layer value. Layers no longer hide active-side wires.
+        return True
 
-    def wire_layer_label(self, layer: str) -> str:
-        return dict(self.wire_layers).get(layer, layer or "Main")
+    @staticmethod
+    def wire_layer_label(layer: str) -> str:
+        return "Wire"
 
     @staticmethod
     def _parse_hex_color(color: str) -> Tuple[int, int, int]:
@@ -1334,7 +1319,14 @@ class PerfboardPlanner(tk.Tk):
             return
         style = self._mode_style()
         side = self.current_side_label().upper()
-        ghost = " | see-through ON" if self.show_opposite_layer.get() else ""
+        visible_ghosts = []
+        if self.show_opposite_layer.get():
+            visible_ghosts.append("parts")
+        if self.show_opposite_pins.get():
+            visible_ghosts.append("pins")
+        if self.show_opposite_wires.get():
+            visible_ghosts.append("wires")
+        ghost = " | ghost: " + ", ".join(visible_ghosts) if visible_ghosts else " | ghost off"
         self.mode_banner.configure(text=f"{side} SIDE  |  {style['label']}  —  {style['hint']}{ghost}", bg=style["color"])
         self.canvas_border.configure(bg=style["color"])
 
@@ -1513,8 +1505,9 @@ class PerfboardPlanner(tk.Tk):
         opposite = self.other_side()
         if self.show_opposite_layer.get():
             self.draw_components(side=opposite, ghost=True)
-        if self.show_opposite_connections.get():
+        if self.show_opposite_wires.get():
             self.draw_wires(side=opposite, ghost=True)
+        if self.show_opposite_pins.get():
             self.draw_opposite_connection_points(opposite)
 
         active = self.current_side.get()
@@ -1589,8 +1582,9 @@ class PerfboardPlanner(tk.Tk):
                     font=("TkDefaultFont", max(6, round(8 * self.zoom)), "bold"),
                     tags=tags,
                 )
-                self.draw_component_jumpers(comp, ghost=True)
-                self.draw_component_pins(i, comp, selected=False, ghost=True)
+                if self.show_opposite_pins.get():
+                    self.draw_component_jumpers(comp, ghost=True)
+                    self.draw_component_pins(i, comp, selected=False, ghost=True)
                 continue
 
             outline = "#ffffff" if selected else "#111111"
@@ -1722,8 +1716,6 @@ class PerfboardPlanner(tk.Tk):
         for i, wire in enumerate(self.wires):
             if side is not None and wire.side != side:
                 continue
-            if not self.wire_layer_visible(getattr(wire, "layer", "main")):
-                continue
             points_xy = [self.grid_to_xy(row, col) for row, col in wire.points]
             selected = (not ghost) and self.selected_kind == "wire" and self.selected_index == i
             width = max(1, round((4 if ghost else (7 if selected else 5)) * self.zoom))
@@ -1829,8 +1821,6 @@ class PerfboardPlanner(tk.Tk):
         for i in range(len(self.wires) - 1, -1, -1):
             wire = self.wires[i]
             if wire.side != side:
-                continue
-            if not self.wire_layer_visible(getattr(wire, "layer", "main")):
                 continue
             pts = [self.grid_to_xy(row, col) for row, col in wire.points]
             for a, b in zip(pts, pts[1:]):
@@ -1971,7 +1961,7 @@ class PerfboardPlanner(tk.Tk):
         if grid:
             row, col = grid
             active_pin_text = self.pin_text_at_grid(grid, self.current_side.get())
-            other_pin_text = self.pin_text_at_grid(grid, self.other_side(), include_side=True) if self.show_opposite_connections.get() else ""
+            other_pin_text = self.pin_text_at_grid(grid, self.other_side(), include_side=True) if self.show_opposite_pins.get() else ""
             combined_pin_text = ", ".join(part for part in [active_pin_text, other_pin_text] if part)
             location = f"{combined_pin_text} at row {row + 1}, col {col + 1}" if combined_pin_text else f"Hole row {row + 1}, col {col + 1}"
             if self.mode.get() == "wire" and self.temp_wire_points:
@@ -2017,8 +2007,6 @@ class PerfboardPlanner(tk.Tk):
             wire = self.wires[i]
             if wire.side != self.current_side.get():
                 continue
-            if not self.wire_layer_visible(getattr(wire, "layer", "main")):
-                continue
             pts = [self.grid_to_xy(row, col) for row, col in wire.points]
             for a, b in zip(pts, pts[1:]):
                 if self.distance_to_segment(x, y, a[0], a[1], b[0], b[1]) <= max(6, 8 * self.zoom):
@@ -2056,7 +2044,7 @@ class PerfboardPlanner(tk.Tk):
         name = ""
         if ask_name:
             name = simpledialog.askstring("Wire name", "Wire name:", initialvalue="") or ""
-        self.wires.append(Wire(name, list(self.temp_wire_points), self.current_wire_color.get(), side=self.current_side.get(), layer=self.current_wire_layer.get()))
+        self.wires.append(Wire(name, list(self.temp_wire_points), self.current_wire_color.get(), side=self.current_side.get()))
         self.temp_wire_points.clear()
         self.selected_kind = "wire"
         self.selected_index = len(self.wires) - 1
@@ -2219,7 +2207,7 @@ class PerfboardPlanner(tk.Tk):
         if not path:
             return
         data = {
-            "version": 5,
+            "version": 6,
             "board": {"rows": self.rows, "cols": self.cols, "spacing": self.spacing},
             "components": [asdict(c) for c in self.components],
             "wires": [asdict(w) for w in self.wires],
@@ -2264,7 +2252,7 @@ class PerfboardPlanner(tk.Tk):
                 [tuple(p) for p in w.get("points", [])],
                 w.get("color", "#d00000"),
                 side=w.get("side", "front"),
-                layer=w.get("layer", "main"),
+                layer="main",
             ) for w in data.get("wires", [])]
             self.selected_kind = None
             self.selected_index = None
