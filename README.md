@@ -1,6 +1,6 @@
-# Perfboard Planner v38
+# Perfboard Planner v39
 
-v38 adds bulk wire routing tools on top of the Qt workflow. You can optimize the current side, the whole board, or allow via-based cross-side routing.
+v39 polishes the board interaction: routing avoids other component pins, middle-mouse panning works in every mode, row/column labels are cleaner and configurable per side, crosshair starts on, and keepout zones can be dragged.
 
 ## Run
 
@@ -17,13 +17,15 @@ python run_tk.py
 
 
 
-## v38 changes
+## v39 changes
 
-- Added **Suggest all** in Wire mode.
-- Optimize existing wires on the current side while keeping endpoints.
-- Optimize the whole board across front/back wires.
-- Optional whole-board routing with via transitions to the opposite side.
-- Router still treats component bodies and keepouts as hard no-go areas.
+- Suggested routing now treats other component pins as no-go cells, while still allowing the two selected endpoints.
+- Middle mouse panning works in every mode, not only Select mode.
+- Row/column labels use cleaner slim rails instead of crowded per-hole badges.
+- Front and back label styles are configured independently: numbers, letters, or both.
+- Mouse row/column crosshair is on by default.
+- Keepout zones can be dragged in Select mode.
+- Dragging selected items no longer requires the initial click to land exactly on a board hole.
 
 ## v37 hotfix
 

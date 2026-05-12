@@ -48,8 +48,11 @@ class BoardView(QWidget):
         self.show_front_col_labels = True
         self.show_back_row_labels = True
         self.show_back_col_labels = True
-        self.grid_label_style = "numbers"
-        self.show_mouse_cross = False
+        # Label style can differ by side because the physical back view is mirrored.
+        self.front_grid_label_style = "numbers"
+        self.back_grid_label_style = "numbers"
+        self.grid_label_style = "numbers"  # compatibility fallback for old UI code
+        self.show_mouse_cross = True
         self.inspector_focus_grid: Optional[GridPoint] = None
         self.highlighted_groups: set[str] = set()
         self.show_component_names = True
@@ -170,6 +173,24 @@ class BoardView(QWidget):
             return row, col
         return None
 
+    def view_to_nearest_grid(self, point: QPointF) -> Optional[GridPoint]:
+        """Nearest board coordinate, used when dragging selected objects.
+
+        Selection can start on the body of a keepout, annotation, or component,
+        not necessarily exactly on a hole. Dragging should still feel direct, so
+        this method snaps to the nearest valid hole without the strict hit radius
+        used by normal placement.
+        """
+        sx = (point.x() - self.pan.x()) / self.zoom
+        sy = (point.y() - self.pan.y()) / self.zoom
+        dcol = round((sx - self.margin) / self.layout_model.spacing)
+        row = round((sy - self.margin) / self.layout_model.spacing)
+        row = max(0, min(self.layout_model.rows - 1, row))
+        dcol = max(0, min(self.layout_model.cols - 1, dcol))
+        col = logical_col_from_display(dcol, self.layout_model.cols, self.side)
+        col = max(0, min(self.layout_model.cols - 1, col))
+        return row, col
+
     def paintEvent(self, event):  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -206,49 +227,70 @@ class BoardView(QWidget):
             chars.append(chr(65 + rem))
         return "".join(reversed(chars)) or "A"
 
-    def _grid_label(self, index: int) -> str:
-        if self.grid_label_style == "letters":
+    def _grid_label(self, index: int, style: Optional[str] = None) -> str:
+        style = style or (self.back_grid_label_style if self.side == "back" else self.front_grid_label_style) or self.grid_label_style
+        if style == "letters":
             return self._index_letters(index)
-        if self.grid_label_style == "both":
+        if style == "both":
             return f"{self._index_letters(index)}{index + 1}"
         return str(index + 1)
 
-    def _side_label_visibility(self) -> tuple[bool, bool]:
+    def _side_label_visibility(self) -> tuple[bool, bool, str]:
         if self.side == "back":
-            return self.show_back_row_labels, self.show_back_col_labels
-        return self.show_front_row_labels, self.show_front_col_labels
+            return self.show_back_row_labels, self.show_back_col_labels, self.back_grid_label_style
+        return self.show_front_row_labels, self.show_front_col_labels, self.front_grid_label_style
 
     def _draw_grid_labels(self, painter: QPainter, board_rect: QRectF) -> None:
-        show_rows, show_cols = self._side_label_visibility()
+        show_rows, show_cols, style = self._side_label_visibility()
         if not (show_rows or show_cols):
             return
+
+        # Use slim rails instead of a separate rounded badge per hole. The old
+        # badge-per-number look became cluttered on narrow boards and when zoomed
+        # out, especially along the top edge.
         painter.save()
-        painter.setFont(QFont("Segoe UI", max(7, int(8.5 * self.zoom)), QFont.Weight.Bold))
-        painter.setPen(QColor("#dbeafe"))
-        badge_bg = QColor(15, 23, 42, 145)
-        pad = max(18, 18 * self.zoom)
+        font_size = max(6, min(11, int(8.0 * self.zoom)))
+        painter.setFont(QFont("Segoe UI", font_size, QFont.Weight.Bold))
+        rail_bg = QColor(15, 23, 42, 118)
+        text_color = QColor("#dbeafe")
+        tick_pen = QPen(QColor(219, 234, 254, 88), max(1.0, 1.0 * self.zoom))
+        text_metrics = painter.fontMetrics()
+
         if show_cols:
+            rail_h = max(15.0, 17.0 * self.zoom)
+            rail = QRectF(board_rect.left(), board_rect.top() - rail_h - 5 * self.zoom, board_rect.width(), rail_h)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(rail_bg)
+            painter.drawRoundedRect(rail, 6, 6)
             for c in range(self.layout_model.cols):
                 p = self.grid_to_view(0, c)
-                txt = self._grid_label(c)
-                w = max(18, 9 * len(txt) + 8)
-                rect = QRectF(p.x() - w/2, board_rect.top() - pad - 4, w, 16)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(badge_bg)
-                painter.drawRoundedRect(rect, 5, 5)
-                painter.setPen(QColor("#dbeafe"))
-                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, txt)
+                txt = self._grid_label(c, style)
+                label_w = text_metrics.horizontalAdvance(txt)
+                painter.setPen(tick_pen)
+                painter.drawLine(QPointF(p.x(), rail.bottom() - 3), QPointF(p.x(), rail.bottom() + 4 * self.zoom))
+                painter.setPen(text_color)
+                if label_w > self.layout_model.spacing * self.zoom * 0.82:
+                    painter.save()
+                    painter.translate(p.x(), rail.center().y() + 1)
+                    painter.rotate(-55)
+                    painter.drawText(QRectF(-label_w / 2, -rail_h / 2, label_w + 4, rail_h), Qt.AlignmentFlag.AlignCenter, txt)
+                    painter.restore()
+                else:
+                    painter.drawText(QRectF(p.x() - label_w / 2 - 2, rail.top(), label_w + 4, rail_h), Qt.AlignmentFlag.AlignCenter, txt)
+
         if show_rows:
+            rail_w = max(18.0, 20.0 * self.zoom)
+            rail = QRectF(board_rect.left() - rail_w - 5 * self.zoom, board_rect.top(), rail_w, board_rect.height())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(rail_bg)
+            painter.drawRoundedRect(rail, 6, 6)
             for r in range(self.layout_model.rows):
                 p = self.grid_to_view(r, 0)
-                txt = self._grid_label(r)
-                w = max(18, 9 * len(txt) + 8)
-                rect = QRectF(board_rect.left() - pad - w + 10, p.y() - 8, w, 16)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(badge_bg)
-                painter.drawRoundedRect(rect, 5, 5)
-                painter.setPen(QColor("#dbeafe"))
-                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, txt)
+                txt = self._grid_label(r, style)
+                painter.setPen(tick_pen)
+                painter.drawLine(QPointF(rail.right() - 3, p.y()), QPointF(rail.right() + 4 * self.zoom, p.y()))
+                painter.setPen(text_color)
+                painter.drawText(QRectF(rail.left(), p.y() - 8, rail_w, 16), Qt.AlignmentFlag.AlignCenter, txt)
         painter.restore()
 
     def _draw_mouse_cross(self, painter: QPainter) -> None:
@@ -409,6 +451,14 @@ class BoardView(QWidget):
                     pt = (r, c)
                     if pt not in endpoints and board_contains(r, c, self.layout_model.rows, self.layout_model.cols):
                         blocked.add(pt)
+        for comp in self.layout_model.components:
+            if comp.side != side or self._is_item_hidden_by_group(comp):
+                continue
+            for pin in comp.pins:
+                pt = component_pin_absolute(comp, pin)
+                if pt not in endpoints and board_contains(pt[0], pt[1], self.layout_model.rows, self.layout_model.cols):
+                    blocked.add(pt)
+
         for zone in self.layout_model.keepouts:
             if self._is_item_hidden_by_group(zone) or zone.side not in {"both", side}:
                 continue
@@ -1058,7 +1108,7 @@ class BoardView(QWidget):
     def mousePressEvent(self, event: QMouseEvent):  # noqa: N802
         self.setFocus()
         pos = QPointF(event.position())
-        if event.button() in {Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton} and self.tool == "select":
+        if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.RightButton and self.tool == "select"):
             self.dragging_view = True
             self.drag_last_pos = pos
             return
@@ -1082,7 +1132,7 @@ class BoardView(QWidget):
                 else:
                     if hit not in self.selected:
                         self.selected = {hit}
-                self.drag_start_grid = grid
+                self.drag_start_grid = grid or self.view_to_nearest_grid(pos)
                 self._cache_drag_originals()
                 self._drag_snapshot_taken = False
             else:
@@ -1147,12 +1197,15 @@ class BoardView(QWidget):
             r, c = grid
             mapped_c = display_col_for_side(c, self.layout_model.cols, "back" if self.side == "front" else "front")
             self.statusMessage.emit(f"{self.side.title()} hole r{r+1} c{c+1} · opposite physical c{mapped_c+1}")
-        if self.tool == "select" and self.drag_start_grid and self.drag_originals and grid:
+        if self.tool == "select" and self.drag_start_grid and self.drag_originals:
+            drag_grid = grid or self.view_to_nearest_grid(pos)
+            if not drag_grid:
+                return
             if not self._drag_snapshot_taken:
                 self.beforeLayoutChange.emit("Move selected items")
                 self._drag_snapshot_taken = True
-            dr = grid[0] - self.drag_start_grid[0]
-            dc = grid[1] - self.drag_start_grid[1]
+            dr = drag_grid[0] - self.drag_start_grid[0]
+            dc = drag_grid[1] - self.drag_start_grid[1]
             self._apply_drag_delta(dr, dc)
             self.layoutChanged.emit(); self.update()
 
@@ -1343,7 +1396,7 @@ class BoardView(QWidget):
             elif sel[0] == "annotation":
                 self.drag_originals[sel] = (item.row, item.col)
             elif sel[0] == "keepout":
-                continue
+                self.drag_originals[sel] = (item.row1, item.col1, item.row2, item.col2)
 
     def _apply_drag_delta(self, dr: int, dc: int) -> None:
         for sel, original in self.drag_originals.items():
@@ -1359,3 +1412,15 @@ class BoardView(QWidget):
             elif sel[0] in {"via", "annotation"}:
                 row, col = original
                 item.row = max(0, min(self.layout_model.rows-1, row+dr)); item.col = max(0, min(self.layout_model.cols-1, col+dc))
+            elif sel[0] == "keepout":
+                r1, c1, r2, c2 = original
+                min_r, max_r = min(r1, r2), max(r1, r2)
+                min_c, max_c = min(c1, c2), max(c1, c2)
+                height = max_r - min_r
+                width = max_c - min_c
+                new_min_r = max(0, min(self.layout_model.rows - 1 - height, min_r + dr))
+                new_min_c = max(0, min(self.layout_model.cols - 1 - width, min_c + dc))
+                rr1, rr2 = new_min_r, new_min_r + height
+                cc1, cc2 = new_min_c, new_min_c + width
+                item.row1, item.row2 = (rr1, rr2) if r1 <= r2 else (rr2, rr1)
+                item.col1, item.col2 = (cc1, cc2) if c1 <= c2 else (cc2, cc1)

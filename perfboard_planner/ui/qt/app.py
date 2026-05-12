@@ -76,7 +76,7 @@ class CompactTabWidget(QTabWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v38")
+        self.setWindowTitle("Perfboard Planner v39")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
@@ -1060,8 +1060,10 @@ class MainWindow(QMainWindow):
             for cb in [cb_names, cb_pins, cb_counts, cb_other_parts, cb_other_pins, cb_other_wires, cb_keepouts, cb_other_keepouts, cb_cross]:
                 view.addRow(cb)
 
-            label_style = self._combo(self.board.grid_label_style, ["numbers", "letters", "both"], lambda v: setattr(self.board, "grid_label_style", v) or self.board.update())
-            view.addRow("Row/column label style", label_style)
+            front_style = self._combo(self.board.front_grid_label_style, ["numbers", "letters", "both"], lambda v: setattr(self.board, "front_grid_label_style", v) or self.board.update())
+            back_style = self._combo(self.board.back_grid_label_style, ["numbers", "letters", "both"], lambda v: setattr(self.board, "back_grid_label_style", v) or self.board.update())
+            view.addRow("Front label style", front_style)
+            view.addRow("Back label style", back_style)
             cb_fr = QCheckBox("Front row labels"); cb_fr.setChecked(self.board.show_front_row_labels); cb_fr.toggled.connect(lambda v: setattr(self.board, "show_front_row_labels", v) or self.board.update())
             cb_fc = QCheckBox("Front column labels"); cb_fc.setChecked(self.board.show_front_col_labels); cb_fc.toggled.connect(lambda v: setattr(self.board, "show_front_col_labels", v) or self.board.update())
             cb_br = QCheckBox("Back row labels"); cb_br.setChecked(self.board.show_back_row_labels); cb_br.toggled.connect(lambda v: setattr(self.board, "show_back_row_labels", v) or self.board.update())
