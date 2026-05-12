@@ -1,6 +1,6 @@
-# Perfboard Planner v30
+# Perfboard Planner v31
 
-v30 is the first full modern UI rewrite. The older Tkinter UI is still included as a fallback, but the new main interface is built with PySide6/Qt.
+v31 refines the first Qt rewrite with a cleaner canvas header/footer, compact wire-color swatches, a visual pin editor, mode border cues, and BOM as a dedicated window instead of a dock tab. The older Tkinter UI is still included as a fallback.
 
 ## Install
 
@@ -23,14 +23,16 @@ python run_qt.py
 python run_tk.py
 ```
 
-## New v30 UI direction
+## New v31 UI direction
 
 The app now uses a modern editor layout:
 
 - top toolbar for file actions, undo/redo, modes, side selection, warnings, and BOM
-- central zoomable board canvas
-- left dock for objects, warnings, wire color visibility, footprint library, and BOM
+- central zoomable board canvas with a wire-color swatch rail above it
+- bottom-right zoom controls below the canvas
+- left dock for objects, warnings, and footprint library
 - right inspector for editing selected objects and project settings
+- visual pin-layout editor for component pins and internal jumpers
 - status bar with physical front/back hole mapping
 
 The back side is still shown as a physical mirrored view by default.

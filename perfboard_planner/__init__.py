@@ -1,8 +1,6 @@
-"""Perfboard Planner v29.
+"""Perfboard Planner v31.
 
-A refactored package version of the original prototype.  The Tkinter UI is
-kept as the current frontend, while reusable model/storage/geometry logic now
-lives outside the UI so a future Qt or web frontend can reuse it.
+Qt UI refinement pass on top of the refactored core package.
 """
 
-__version__ = "29.0"
+__version__ = "31.0"

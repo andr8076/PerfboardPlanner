@@ -94,4 +94,34 @@ QStatusBar {
     background: #ffffff;
     border-top: 1px solid #dfe4ee;
 }
+QFrame#CanvasTopBar, QFrame#CanvasFooter {
+    background: #ffffff;
+    border-bottom: 1px solid #dfe4ee;
+}
+QFrame#CanvasFooter {
+    border-top: 1px solid #dfe4ee;
+    border-bottom: 0;
+}
+QLabel#MutedLabel {
+    color: #64748b;
+}
+QFrame#PinGridFrame {
+    background: #ffffff;
+    border: 1px solid #dfe4ee;
+    border-radius: 12px;
+}
+QLabel#PinGridCoord {
+    color: #64748b;
+    font-size: 8pt;
+}
+QTabBar::scroller {
+    width: 36px;
+}
+QTabBar QToolButton {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 7px;
+    margin: 2px;
+}
+
 """

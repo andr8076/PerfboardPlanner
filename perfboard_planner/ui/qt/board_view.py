@@ -21,6 +21,8 @@ class BoardView(QWidget):
     statusMessage = Signal(str)
     annotationRequested = Signal(int, int)
     itemActivated = Signal(str, int)
+    toolRequested = Signal(str)
+    zoomChanged = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,6 +85,23 @@ class BoardView(QWidget):
             return
         self.zoom = max(0.2, min(3.0, min(self.width() / board_w, self.height() / board_h)))
         self.pan = QPointF(20, 20)
+        self.zoomChanged.emit(self.zoom)
+        self.update()
+
+    def set_zoom_value(self, value: float) -> None:
+        self.zoom = max(0.25, min(4.0, float(value)))
+        self.zoomChanged.emit(self.zoom)
+        self.update()
+
+    def zoom_in(self) -> None:
+        self.set_zoom_value(self.zoom * 1.15)
+
+    def zoom_out(self) -> None:
+        self.set_zoom_value(self.zoom / 1.15)
+
+    def reset_zoom(self) -> None:
+        self.zoom = 1.0
+        self.zoomChanged.emit(self.zoom)
         self.update()
 
     def grid_to_scene(self, row: int, col: int) -> QPointF:
@@ -142,8 +161,20 @@ class BoardView(QWidget):
         p2 = self.grid_to_view(self.layout_model.rows - 1, self.layout_model.cols - 1)
         rect = QRectF(min(p1.x(), p2.x()) - 28 * self.zoom, min(p1.y(), p2.y()) - 28 * self.zoom, abs(p2.x() - p1.x()) + 56 * self.zoom, abs(p2.y() - p1.y()) + 56 * self.zoom)
         painter.setBrush(QColor("#177a3b"))
-        border = QColor("#5b8def") if self.side == "front" else QColor("#f59e0b")
-        painter.setPen(QPen(border, max(2.0, 4 * self.zoom)))
+        side_border = QColor("#5b8def") if self.side == "front" else QColor("#f59e0b")
+        mode_colors = {
+            "component": QColor("#8b5cf6"),
+            "wire": QColor("#ef4444"),
+            "via": QColor("#a855f7"),
+            "annotation": QColor("#0ea5e9"),
+            "keepout": QColor("#f97316"),
+        }
+        if self.tool != "select" and self.tool in mode_colors:
+            painter.setPen(QPen(mode_colors[self.tool], max(4.0, 7 * self.zoom)))
+            painter.drawRoundedRect(rect.adjusted(-4 * self.zoom, -4 * self.zoom, 4 * self.zoom, 4 * self.zoom), 16 * self.zoom, 16 * self.zoom)
+            painter.setPen(QPen(side_border, max(1.5, 2.2 * self.zoom)))
+        else:
+            painter.setPen(QPen(side_border, max(2.0, 4 * self.zoom)))
         painter.drawRoundedRect(rect, 14 * self.zoom, 14 * self.zoom)
 
         # subtle strip hints
@@ -358,6 +389,7 @@ class BoardView(QWidget):
             pos = QPointF(event.position())
             scene_before = QPointF((pos.x()-self.pan.x())/old_zoom, (pos.y()-self.pan.y())/old_zoom)
             self.pan = QPointF(pos.x()-scene_before.x()*self.zoom, pos.y()-scene_before.y()*self.zoom)
+            self.zoomChanged.emit(self.zoom)
             self.statusMessage.emit(f"Zoom {int(self.zoom*100)}%")
         else:
             delta = event.angleDelta()
@@ -376,6 +408,11 @@ class BoardView(QWidget):
             return
         grid = self.view_to_grid(pos)
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self.tool != "select" and grid is None:
+            self.set_tool("select")
+            self.toolRequested.emit("select")
+            self.statusMessage.emit("Returned to Select mode.")
             return
         if self.tool == "select":
             hit = self.hit_test(pos)

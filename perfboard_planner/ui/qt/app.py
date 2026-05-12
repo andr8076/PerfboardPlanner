@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize, QPointF
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QToolBar,
     QToolButton,
+    QStyle,
+    QInputDialog,
     QVBoxLayout,
     QWidget,
 )
@@ -56,7 +58,7 @@ from .style import APP_STYLESHEET
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v30")
+        self.setWindowTitle("Perfboard Planner v31")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
@@ -74,49 +76,128 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.board = BoardView()
         self.board.set_layout(self.layout_model)
-        self.setCentralWidget(self.board)
+
+        self.canvas_shell = QWidget()
+        shell_layout = QVBoxLayout(self.canvas_shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        self.canvas_topbar = QFrame()
+        self.canvas_topbar.setObjectName("CanvasTopBar")
+        topbar_layout = QHBoxLayout(self.canvas_topbar)
+        topbar_layout.setContentsMargins(10, 6, 10, 6)
+        topbar_layout.setSpacing(8)
+        topbar_layout.addWidget(QLabel("Wire colors"))
+        self.color_swatch_area = QWidget()
+        self.color_swatch_layout = QHBoxLayout(self.color_swatch_area)
+        self.color_swatch_layout.setContentsMargins(0, 0, 0, 0)
+        self.color_swatch_layout.setSpacing(6)
+        topbar_layout.addWidget(self.color_swatch_area, 1)
+        self.show_all_colors_btn = QToolButton()
+        self.show_all_colors_btn.setText("All")
+        self.show_all_colors_btn.setToolTip("Show all wire colors")
+        topbar_layout.addWidget(self.show_all_colors_btn)
+        shell_layout.addWidget(self.canvas_topbar)
+
+        shell_layout.addWidget(self.board, 1)
+
+        self.canvas_footer = QFrame()
+        self.canvas_footer.setObjectName("CanvasFooter")
+        footer_layout = QHBoxLayout(self.canvas_footer)
+        footer_layout.setContentsMargins(10, 6, 10, 6)
+        footer_layout.setSpacing(6)
+        footer_layout.addStretch(1)
+        self.zoom_out_button = QToolButton(); self.zoom_out_button.setText("−"); self.zoom_out_button.setToolTip("Zoom out")
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setMinimumWidth(52)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_in_button = QToolButton(); self.zoom_in_button.setText("+"); self.zoom_in_button.setToolTip("Zoom in")
+        self.zoom_reset_button = QToolButton(); self.zoom_reset_button.setText("100%"); self.zoom_reset_button.setToolTip("Reset zoom")
+        self.zoom_fit_button = QToolButton(); self.zoom_fit_button.setText("Fit"); self.zoom_fit_button.setToolTip("Fit board to view")
+        for w in [self.zoom_out_button, self.zoom_label, self.zoom_in_button, self.zoom_reset_button, self.zoom_fit_button]:
+            footer_layout.addWidget(w)
+        shell_layout.addWidget(self.canvas_footer)
+
+        self.setCentralWidget(self.canvas_shell)
         self._build_toolbar()
         self._build_left_dock()
         self._build_right_dock()
         self.statusBar().showMessage("Ready")
 
+    def _simple_icon(self, color: str, shape: str = "dot") -> QIcon:
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        qcolor = QColor(color)
+        painter.setPen(QPen(qcolor.darker(120), 2))
+        painter.setBrush(qcolor)
+        if shape == "line":
+            painter.setPen(QPen(qcolor, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(4, 15, 16, 5)
+        elif shape == "rect":
+            painter.drawRoundedRect(4, 4, 12, 12, 3, 3)
+        elif shape == "via":
+            painter.drawEllipse(4, 4, 12, 12)
+            painter.setBrush(QColor("#ffffff"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(8, 8, 4, 4)
+        elif shape == "note":
+            painter.drawRoundedRect(4, 5, 12, 10, 2, 2)
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawLine(7, 8, 13, 8)
+            painter.drawLine(7, 11, 12, 11)
+        else:
+            painter.drawEllipse(5, 5, 10, 10)
+        painter.end()
+        return QIcon(pixmap)
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
-        toolbar.setIconSize(QSize(18, 18))
+        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
-        self.new_action = QAction("New", self); self.new_action.setShortcut(QKeySequence.StandardKey.New)
-        self.open_action = QAction("Open", self); self.open_action.setShortcut(QKeySequence.StandardKey.Open)
-        self.save_action = QAction("Save", self); self.save_action.setShortcut(QKeySequence.StandardKey.Save)
-        self.save_as_action = QAction("Save As", self)
+        self.new_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon), "New", self); self.new_action.setShortcut(QKeySequence.StandardKey.New)
+        self.open_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Open", self); self.open_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.save_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save", self); self.save_action.setShortcut(QKeySequence.StandardKey.Save)
+        self.save_as_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DriveFDIcon), "Save As", self)
         for action in [self.new_action, self.open_action, self.save_action, self.save_as_action]:
             toolbar.addAction(action)
         toolbar.addSeparator()
 
-        self.undo_action = QAction("Undo", self); self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
-        self.redo_action = QAction("Redo", self); self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.undo_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack), "Undo", self); self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self.redo_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward), "Redo", self); self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         toolbar.addAction(self.undo_action); toolbar.addAction(self.redo_action)
         toolbar.addSeparator()
 
         self.mode_group = QActionGroup(self)
         self.mode_actions: dict[str, QAction] = {}
-        for text, tool in [("Select", "select"), ("Part", "component"), ("Wire", "wire"), ("Via", "via"), ("Note", "annotation"), ("Keepout", "keepout")]:
-            act = QAction(text, self); act.setCheckable(True); act.setData(tool)
+        mode_defs = [
+            ("Select", "select", "#2457d6", "dot"),
+            ("Part", "component", "#8b5cf6", "rect"),
+            ("Wire", "wire", "#ef4444", "line"),
+            ("Via", "via", "#a855f7", "via"),
+            ("Note", "annotation", "#0ea5e9", "note"),
+            ("Keepout", "keepout", "#f97316", "rect"),
+        ]
+        for text, tool, color, shape in mode_defs:
+            act = QAction(self._simple_icon(color, shape), text, self)
+            act.setCheckable(True); act.setData(tool)
             self.mode_group.addAction(act); toolbar.addAction(act); self.mode_actions[tool] = act
         self.mode_actions["select"].setChecked(True)
         toolbar.addSeparator()
 
-        self.front_action = QAction("Front", self); self.front_action.setCheckable(True); self.front_action.setChecked(True)
-        self.back_action = QAction("Back", self); self.back_action.setCheckable(True)
+        self.front_action = QAction(self._simple_icon("#2563eb", "rect"), "Front", self); self.front_action.setCheckable(True); self.front_action.setChecked(True)
+        self.back_action = QAction(self._simple_icon("#f59e0b", "rect"), "Back", self); self.back_action.setCheckable(True)
         self.side_group = QActionGroup(self); self.side_group.addAction(self.front_action); self.side_group.addAction(self.back_action)
         toolbar.addAction(self.front_action); toolbar.addAction(self.back_action)
         toolbar.addSeparator()
 
-        self.zoom_fit_action = QAction("Fit", self)
-        self.warnings_action = QAction("Warnings", self)
-        self.bom_action = QAction("BOM", self)
-        toolbar.addAction(self.zoom_fit_action); toolbar.addAction(self.warnings_action); toolbar.addAction(self.bom_action)
+        self.warnings_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning), "Warnings", self)
+        self.bom_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "BOM", self)
+        toolbar.addAction(self.warnings_action); toolbar.addAction(self.bom_action)
 
     def _build_left_dock(self) -> None:
         dock = QDockWidget("Project", self)
@@ -127,6 +208,8 @@ class MainWindow(QMainWindow):
         dock.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         self.left_tabs = tabs
+        tabs.setUsesScrollButtons(True)
+        tabs.setElideMode(Qt.TextElideMode.ElideRight)
 
         # Objects tree
         objects_tab = QWidget(); objects_layout = QVBoxLayout(objects_tab)
@@ -146,16 +229,6 @@ class MainWindow(QMainWindow):
         warnings_layout.addWidget(self.warning_summary_label); warnings_layout.addWidget(self.warning_list)
         tabs.addTab(warnings_tab, "Warnings")
 
-        # Wire colors compact rail
-        colors_tab = QWidget(); colors_layout = QVBoxLayout(colors_tab)
-        colors_layout.addWidget(QLabel("Click a color to hide/show wires."))
-        self.color_swatch_area = QWidget(); self.color_swatch_layout = QGridLayout(self.color_swatch_area); self.color_swatch_layout.setContentsMargins(0,0,0,0); self.color_swatch_layout.setSpacing(6)
-        colors_layout.addWidget(self.color_swatch_area)
-        self.show_all_colors_btn = QPushButton("Show all wire colors")
-        colors_layout.addWidget(self.show_all_colors_btn)
-        colors_layout.addStretch(1)
-        tabs.addTab(colors_tab, "Wire colors")
-
         # Library
         library_tab = QWidget(); lib_layout = QVBoxLayout(library_tab)
         lib_layout.addWidget(QLabel("Quick footprints"))
@@ -165,14 +238,7 @@ class MainWindow(QMainWindow):
         lib_layout.addWidget(self.library_list)
         tabs.addTab(library_tab, "Library")
 
-        # BOM preview
-        bom_tab = QWidget(); bom_layout = QVBoxLayout(bom_tab)
-        self.bom_table = QTableWidget(0, 5)
-        self.bom_table.setHorizontalHeaderLabels(["Qty", "Category", "Type", "Value", "Names"])
-        self.bom_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.export_bom_button = QPushButton("Export BOM CSV")
-        bom_layout.addWidget(self.bom_table); bom_layout.addWidget(self.export_bom_button)
-        tabs.addTab(bom_tab, "BOM")
+        self.bom_table = None
 
     def _build_right_dock(self) -> None:
         dock = QDockWidget("Inspector", self)
@@ -195,13 +261,14 @@ class MainWindow(QMainWindow):
         self.mode_group.triggered.connect(lambda action: self.set_tool(action.data()))
         self.front_action.triggered.connect(lambda: self.set_side("front"))
         self.back_action.triggered.connect(lambda: self.set_side("back"))
-        self.zoom_fit_action.triggered.connect(self.board.fit_to_view)
         self.warnings_action.triggered.connect(lambda: self.left_tabs.setCurrentIndex(1))
-        self.bom_action.triggered.connect(lambda: self.left_tabs.setCurrentIndex(4))
+        self.bom_action.triggered.connect(self.show_bom_dialog)
         self.board.beforeLayoutChange.connect(self.push_undo)
         self.board.layoutChanged.connect(self._on_layout_changed)
         self.board.selectionChanged.connect(self.populate_inspector)
         self.board.statusMessage.connect(self.statusBar().showMessage)
+        self.board.toolRequested.connect(self.set_tool)
+        self.board.zoomChanged.connect(self.update_zoom_label)
         self.board.annotationRequested.connect(self.create_annotation)
         self.board.itemActivated.connect(lambda kind, idx: self.populate_inspector())
         self.delete_button.clicked.connect(self.board.delete_selected)
@@ -210,7 +277,14 @@ class MainWindow(QMainWindow):
         self.warning_list.itemClicked.connect(self.focus_warning_item)
         self.show_all_colors_btn.clicked.connect(self.show_all_wire_colors)
         self.library_list.itemDoubleClicked.connect(self.apply_library_preset)
-        self.export_bom_button.clicked.connect(self.export_bom_csv)
+        self.zoom_out_button.clicked.connect(lambda: self.board.zoom_out())
+        self.zoom_in_button.clicked.connect(lambda: self.board.zoom_in())
+        self.zoom_reset_button.clicked.connect(lambda: self.board.reset_zoom())
+        self.zoom_fit_button.clicked.connect(self.board.fit_to_view)
+
+    def update_zoom_label(self, zoom: float) -> None:
+        if hasattr(self, "zoom_label"):
+            self.zoom_label.setText(f"{int(round(zoom * 100))}%")
 
     def set_tool(self, tool: str) -> None:
         self.board.set_tool(tool)
@@ -386,20 +460,29 @@ class MainWindow(QMainWindow):
             item = self.color_swatch_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        counts: dict[str, int] = {}
+        counts: dict[str, dict[str, int]] = {}
         for wire in self.layout_model.wires:
-            counts[wire.color] = counts.get(wire.color, 0) + 1
-        for n, (color, count) in enumerate(sorted(counts.items())):
+            entry = counts.setdefault(wire.color, {"front": 0, "back": 0})
+            entry[wire.side] = entry.get(wire.side, 0) + 1
+        if not counts:
+            empty = QLabel("No wires yet")
+            empty.setObjectName("MutedLabel")
+            self.color_swatch_layout.addWidget(empty)
+            return
+        for color, side_counts in sorted(counts.items()):
+            total = side_counts.get("front", 0) + side_counts.get("back", 0)
+            hidden = color in self.board.hidden_wire_colors
             button = QToolButton()
-            button.setText("×" if color in self.board.hidden_wire_colors else str(count))
-            button.setToolTip(f"{color}: {count} wire(s). Click to hide/show.")
-            button.setCheckable(True); button.setChecked(color not in self.board.hidden_wire_colors)
+            button.setText("×" if hidden else (str(total) if total > 1 else ""))
+            button.setToolTip(f"{color} · front {side_counts.get('front', 0)}, back {side_counts.get('back', 0)}. Click to hide/show.")
+            button.setCheckable(True); button.setChecked(not hidden)
             fg = "#ffffff" if QColor(color).lightness() < 120 else "#111827"
-            bg = "#ffffff" if color in self.board.hidden_wire_colors else color
-            border = color if color in self.board.hidden_wire_colors else "#cbd5e1"
-            button.setStyleSheet(f"QToolButton {{background: {bg}; color: {fg}; border-radius: 9px; min-width: 34px; min-height: 28px; font-weight: 700; border: 2px solid {border};}}")
+            bg = "#ffffff" if hidden else color
+            border = color if hidden else "rgba(15, 23, 42, 0.18)"
+            button.setStyleSheet(f"QToolButton {{background: {bg}; color: {fg}; border-radius: 8px; min-width: 28px; max-width: 34px; min-height: 24px; font-weight: 800; border: 2px solid {border};}}")
             button.clicked.connect(lambda checked=False, c=color: self.toggle_wire_color(c))
-            self.color_swatch_layout.addWidget(button, n // 5, n % 5)
+            self.color_swatch_layout.addWidget(button)
+        self.color_swatch_layout.addStretch(1)
 
     def toggle_wire_color(self, color: str) -> None:
         if color in self.board.hidden_wire_colors:
@@ -412,11 +495,17 @@ class MainWindow(QMainWindow):
         self.board.hidden_wire_colors.clear(); self.populate_wire_colors(); self.board.update()
 
     def populate_bom(self) -> None:
+        if not getattr(self, "bom_table", None):
+            return
         rows = bom_rows(self.layout_model)
         self.bom_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             for c, value in enumerate([row.quantity, row.category, row.component_type, row.value, row.names]):
                 self.bom_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def show_bom_dialog(self) -> None:
+        dlg = BomDialog(self.layout_model, self)
+        dlg.exec()
 
     def export_bom_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export BOM CSV", "bom.csv", "CSV (*.csv);;All files (*.*)")
@@ -717,6 +806,41 @@ class MainWindow(QMainWindow):
         self._refresh_all()
 
 
+class BomDialog(QDialog):
+    def __init__(self, layout_model: Layout, parent=None):
+        super().__init__(parent)
+        self.layout_model = layout_model
+        self.setWindowTitle("Bill of materials")
+        self.resize(760, 460)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Grouped by category, type, and value."))
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Qty", "Category", "Type", "Value", "Names"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table, 1)
+        buttons = QHBoxLayout()
+        export_btn = QPushButton("Export CSV")
+        close_btn = QPushButton("Close")
+        buttons.addStretch(1); buttons.addWidget(export_btn); buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+        export_btn.clicked.connect(self.export_csv)
+        close_btn.clicked.connect(self.accept)
+        self.populate()
+
+    def populate(self) -> None:
+        rows = bom_rows(self.layout_model)
+        self.table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, value in enumerate([row.quantity, row.category, row.component_type, row.value, row.names]):
+                self.table.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def export_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export BOM CSV", "bom.csv", "CSV (*.csv);;All files (*.*)")
+        if not path:
+            return
+        Path(path).write_text(bom_csv(self.layout_model, separator=";"), encoding="utf-8")
+
+
 class TextDialog(QDialog):
     def __init__(self, title: str, label: str, parent=None):
         super().__init__(parent)
@@ -737,82 +861,266 @@ class TextDialog(QDialog):
 class PinEditorDialog(QDialog):
     def __init__(self, component: Component, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Edit pins and internal jumpers")
-        self.resize(620, 520)
+        self.setWindowTitle(f"Pin layout: {component.name or 'component'}")
+        self.resize(760, 620)
         self.pins = [ComponentPin(p.name, p.row, p.col) for p in component.pins]
         self.jumpers = [ComponentJumper(j.pin_a, j.pin_b, j.color) for j in component.jumpers]
         self.width = component.width
         self.height = component.height
+        self.selected_pin_name: str = self.pins[0].name if self.pins else ""
+
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Pins are relative to the component's top-left hole. External pins are allowed."))
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Name", "Relative row", "Relative col"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.table)
-        row = QHBoxLayout()
-        add_btn = QPushButton("Add pin"); remove_btn = QPushButton("Remove selected pin")
-        preset_2 = QPushButton("2-pin horizontal"); preset_dip = QPushButton("DIP sides")
-        row.addWidget(add_btn); row.addWidget(remove_btn); row.addWidget(preset_2); row.addWidget(preset_dip)
-        layout.addLayout(row)
-        layout.addWidget(QLabel("Internal jumpers: one per line as PinA;PinB;#color"))
-        self.jumpers_edit = QTextEdit(); self.jumpers_edit.setMinimumHeight(90)
-        layout.addWidget(self.jumpers_edit)
+        layout.addWidget(QLabel("Click cells to add/select component attachment pins. Yellow cells are the visible component body; outer cells are external lead positions."))
+
+        body = QHBoxLayout()
+        layout.addLayout(body, 1)
+
+        self.grid_frame = QFrame()
+        self.grid_frame.setObjectName("PinGridFrame")
+        self.grid_layout = QGridLayout(self.grid_frame)
+        self.grid_layout.setContentsMargins(10, 10, 10, 10)
+        self.grid_layout.setSpacing(6)
+        body.addWidget(self.grid_frame, 1)
+
+        side = QVBoxLayout()
+        body.addLayout(side)
+        side.addWidget(QLabel("Pins"))
+        self.pin_list = QListWidget()
+        self.pin_list.setMinimumWidth(220)
+        self.pin_list.setMaximumHeight(150)
+        side.addWidget(self.pin_list)
+
+        pin_button_row = QHBoxLayout()
+        self.rename_btn = QPushButton("Rename")
+        self.remove_btn = QPushButton("Remove")
+        pin_button_row.addWidget(self.rename_btn); pin_button_row.addWidget(self.remove_btn)
+        side.addLayout(pin_button_row)
+        self.clear_btn = QPushButton("Clear pins")
+        side.addWidget(self.clear_btn)
+
+        side.addWidget(QLabel("Presets"))
+        preset_grid = QGridLayout()
+        self.preset_two_btn = QPushButton("2-pin horizontal")
+        self.preset_four_btn = QPushButton("4 corners")
+        self.preset_dip_btn = QPushButton("DIP sides")
+        self.preset_external_btn = QPushButton("External leads")
+        preset_grid.addWidget(self.preset_two_btn, 0, 0)
+        preset_grid.addWidget(self.preset_four_btn, 0, 1)
+        preset_grid.addWidget(self.preset_dip_btn, 1, 0)
+        preset_grid.addWidget(self.preset_external_btn, 1, 1)
+        side.addLayout(preset_grid)
+
+        side.addSpacing(8)
+        side.addWidget(QLabel("Internal jumpers"))
+        self.jumper_list = QListWidget()
+        self.jumper_list.setMinimumWidth(220)
+        self.jumper_list.setMinimumHeight(110)
+        side.addWidget(self.jumper_list)
+        jumper_row = QHBoxLayout()
+        self.jumper_a = QComboBox(); self.jumper_b = QComboBox()
+        jumper_row.addWidget(self.jumper_a); jumper_row.addWidget(self.jumper_b)
+        side.addLayout(jumper_row)
+        jumper_buttons = QHBoxLayout()
+        self.add_jumper_btn = QPushButton("Add")
+        self.remove_jumper_btn = QPushButton("Remove")
+        jumper_buttons.addWidget(self.add_jumper_btn); jumper_buttons.addWidget(self.remove_jumper_btn)
+        side.addLayout(jumper_buttons)
+        side.addStretch(1)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        add_btn.clicked.connect(self.add_pin); remove_btn.clicked.connect(self.remove_pin)
-        preset_2.clicked.connect(self.preset_two_pin); preset_dip.clicked.connect(self.preset_dip)
-        self.populate()
 
-    def populate(self) -> None:
-        self.table.setRowCount(len(self.pins))
-        for r, pin in enumerate(self.pins):
-            self.table.setItem(r, 0, QTableWidgetItem(pin.name))
-            self.table.setItem(r, 1, QTableWidgetItem(str(pin.row)))
-            self.table.setItem(r, 2, QTableWidgetItem(str(pin.col)))
-        self.jumpers_edit.setPlainText("\n".join(f"{j.pin_a};{j.pin_b};{j.color}" for j in self.jumpers))
+        self.pin_list.itemClicked.connect(self._pin_list_clicked)
+        self.rename_btn.clicked.connect(self.rename_selected_pin)
+        self.remove_btn.clicked.connect(self.remove_selected_pin)
+        self.clear_btn.clicked.connect(self.clear_pins)
+        self.preset_two_btn.clicked.connect(self.preset_two_pin)
+        self.preset_four_btn.clicked.connect(self.preset_four_corners)
+        self.preset_dip_btn.clicked.connect(self.preset_dip)
+        self.preset_external_btn.clicked.connect(self.preset_external_leads)
+        self.add_jumper_btn.clicked.connect(self.add_jumper)
+        self.remove_jumper_btn.clicked.connect(self.remove_selected_jumper)
+        self.refresh()
 
-    def add_pin(self) -> None:
-        self.pins.append(ComponentPin(f"P{len(self.pins)+1}", 0, 0)); self.populate()
+    def _range(self) -> tuple[range, range]:
+        pad = 2
+        return range(-pad, self.height + pad), range(-pad, self.width + pad)
 
-    def remove_pin(self) -> None:
-        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
-        for row in rows:
-            if 0 <= row < len(self.pins): del self.pins[row]
-        self.populate()
+    def pin_at(self, row: int, col: int) -> Optional[ComponentPin]:
+        return next((p for p in self.pins if p.row == row and p.col == col), None)
+
+    def refresh(self) -> None:
+        self.refresh_grid()
+        self.refresh_pin_list()
+        self.refresh_jumpers()
+
+    def refresh_grid(self) -> None:
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        rows, cols = self._range()
+        self.grid_layout.addWidget(QLabel(""), 0, 0)
+        for gc, col in enumerate(cols, start=1):
+            lbl = QLabel(str(col))
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setObjectName("PinGridCoord")
+            self.grid_layout.addWidget(lbl, 0, gc)
+        for gr, row in enumerate(rows, start=1):
+            lbl = QLabel(str(row))
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setObjectName("PinGridCoord")
+            self.grid_layout.addWidget(lbl, gr, 0)
+            for gc, col in enumerate(cols, start=1):
+                pin = self.pin_at(row, col)
+                btn = QToolButton()
+                btn.setMinimumSize(38, 34)
+                btn.setToolTip(f"Relative row {row}, col {col}")
+                btn.setText(pin.name if pin else "•")
+                inside = 0 <= row < self.height and 0 <= col < self.width
+                if pin:
+                    selected = pin.name == self.selected_pin_name
+                    bg = "#111827" if selected else "#f8fafc"
+                    fg = "#ffffff" if selected else "#111827"
+                    border = "#2457d6" if selected else "#111827"
+                    btn.setStyleSheet(f"QToolButton {{background: {bg}; color: {fg}; border: 2px solid {border}; border-radius: 8px; font-weight: 800;}}")
+                elif inside:
+                    btn.setStyleSheet("QToolButton {background: #ffe59a; color: #475569; border: 1px solid #f5c542; border-radius: 8px;} QToolButton:hover {border-color: #2457d6;}")
+                else:
+                    btn.setStyleSheet("QToolButton {background: #eef2f7; color: #64748b; border: 1px solid #cbd5e1; border-radius: 8px;} QToolButton:hover {border-color: #2457d6;}")
+                btn.clicked.connect(lambda checked=False, r=row, c=col: self.toggle_pin_cell(r, c))
+                self.grid_layout.addWidget(btn, gr, gc)
+
+    def refresh_pin_list(self) -> None:
+        self.pin_list.blockSignals(True)
+        self.pin_list.clear()
+        for pin in self.pins:
+            item = QListWidgetItem(f"{pin.name}: row {pin.row}, col {pin.col}")
+            item.setData(Qt.ItemDataRole.UserRole, pin.name)
+            self.pin_list.addItem(item)
+            if pin.name == self.selected_pin_name:
+                item.setSelected(True)
+                self.pin_list.setCurrentItem(item)
+        self.pin_list.blockSignals(False)
+        names = [p.name for p in self.pins]
+        for combo in [self.jumper_a, self.jumper_b]:
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear(); combo.addItems(names)
+            if current in names:
+                combo.setCurrentText(current)
+            combo.blockSignals(False)
+
+    def refresh_jumpers(self) -> None:
+        self.jumper_list.clear()
+        for jumper in self.jumpers:
+            item = QListWidgetItem(f"{jumper.pin_a} ↔ {jumper.pin_b} · {jumper.color}")
+            self.jumper_list.addItem(item)
+
+    def _pin_list_clicked(self, item: QListWidgetItem) -> None:
+        name = item.data(Qt.ItemDataRole.UserRole)
+        if name:
+            self.selected_pin_name = name
+            self.refresh_grid()
+
+    def _next_pin_name(self) -> str:
+        used = {p.name for p in self.pins}
+        n = 1
+        while f"P{n}" in used:
+            n += 1
+        return f"P{n}"
+
+    def toggle_pin_cell(self, row: int, col: int) -> None:
+        pin = self.pin_at(row, col)
+        if pin:
+            self.selected_pin_name = pin.name
+        else:
+            pin = ComponentPin(self._next_pin_name(), row, col)
+            self.pins.append(pin)
+            self.selected_pin_name = pin.name
+        self.refresh()
+
+    def rename_selected_pin(self) -> None:
+        pin = next((p for p in self.pins if p.name == self.selected_pin_name), None)
+        if not pin:
+            return
+        text, ok = QInputDialog.getText(self, "Rename pin", "Pin name:", text=pin.name)
+        if ok and text.strip():
+            old = pin.name
+            pin.name = text.strip()
+            for jumper in self.jumpers:
+                if jumper.pin_a == old:
+                    jumper.pin_a = pin.name
+                if jumper.pin_b == old:
+                    jumper.pin_b = pin.name
+            self.selected_pin_name = pin.name
+            self.refresh()
+
+    def remove_selected_pin(self) -> None:
+        name = self.selected_pin_name
+        self.pins = [p for p in self.pins if p.name != name]
+        self.jumpers = [j for j in self.jumpers if j.pin_a != name and j.pin_b != name]
+        self.selected_pin_name = self.pins[0].name if self.pins else ""
+        self.refresh()
+
+    def clear_pins(self) -> None:
+        self.pins = []
+        self.jumpers = []
+        self.selected_pin_name = ""
+        self.refresh()
 
     def preset_two_pin(self) -> None:
-        self.pins = [ComponentPin("P1", 0, 0), ComponentPin("P2", 0, max(1, self.width-1))]
+        self.pins = [ComponentPin("P1", 0, 0), ComponentPin("P2", 0, max(1, self.width - 1))]
         self.jumpers = []
-        self.populate()
+        self.selected_pin_name = "P1"
+        self.refresh()
+
+    def preset_four_corners(self) -> None:
+        self.pins = [ComponentPin("P1", 0, 0), ComponentPin("P2", 0, self.width - 1), ComponentPin("P3", self.height - 1, 0), ComponentPin("P4", self.height - 1, self.width - 1)]
+        self.jumpers = []
+        self.selected_pin_name = "P1"
+        self.refresh()
 
     def preset_dip(self) -> None:
         n = max(2, self.height)
-        self.pins = [ComponentPin(f"P{i+1}", i, -1) for i in range(n)] + [ComponentPin(f"P{i+n+1}", n-1-i, self.width) for i in range(n)]
+        self.pins = [ComponentPin(f"P{i+1}", i, -1) for i in range(n)] + [ComponentPin(f"P{i+n+1}", n - 1 - i, self.width) for i in range(n)]
         self.jumpers = []
-        self.populate()
+        self.selected_pin_name = "P1"
+        self.refresh()
+
+    def preset_external_leads(self) -> None:
+        self.pins = [
+            ComponentPin("P1", 0, -1),
+            ComponentPin("P2", 0, self.width),
+            ComponentPin("P3", self.height - 1, -1),
+            ComponentPin("P4", self.height - 1, self.width),
+        ]
+        self.jumpers = []
+        self.selected_pin_name = "P1"
+        self.refresh()
+
+    def add_jumper(self) -> None:
+        a = self.jumper_a.currentText().strip()
+        b = self.jumper_b.currentText().strip()
+        if not a or not b or a == b:
+            return
+        if any({j.pin_a, j.pin_b} == {a, b} for j in self.jumpers):
+            return
+        self.jumpers.append(ComponentJumper(a, b, "#00aaff"))
+        self.refresh_jumpers()
+
+    def remove_selected_jumper(self) -> None:
+        row = self.jumper_list.currentRow()
+        if 0 <= row < len(self.jumpers):
+            del self.jumpers[row]
+            self.refresh_jumpers()
 
     def accept(self) -> None:
-        pins: list[ComponentPin] = []
-        for r in range(self.table.rowCount()):
-            try:
-                name = self.table.item(r, 0).text().strip() or f"P{r+1}"
-                row = int(self.table.item(r, 1).text())
-                col = int(self.table.item(r, 2).text())
-                pins.append(ComponentPin(name, row, col))
-            except Exception:
-                QMessageBox.warning(self, "Invalid pin", f"Pin row {r+1} has invalid data.")
-                return
-        names = {p.name for p in pins}
-        jumpers: list[ComponentJumper] = []
-        for line in self.jumpers_edit.toPlainText().splitlines():
-            if not line.strip():
-                continue
-            parts = [p.strip() for p in line.split(";")]
-            if len(parts) >= 2 and parts[0] in names and parts[1] in names:
-                jumpers.append(ComponentJumper(parts[0], parts[1], parts[2] if len(parts) >= 3 and parts[2] else "#00aaff"))
-        self.pins = pins
-        self.jumpers = jumpers
+        names = [p.name for p in self.pins]
+        if len(names) != len(set(names)):
+            QMessageBox.warning(self, "Duplicate pins", "Pin names must be unique.")
+            return
         super().accept()
 
 
