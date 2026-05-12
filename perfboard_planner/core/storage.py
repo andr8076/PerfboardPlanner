@@ -200,7 +200,7 @@ def _drop_obsolete_wire_fields(wire_dict: Dict[str, Any]) -> Dict[str, Any]:
 def layout_to_dict(layout: Layout, *, compact: bool = False) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "schema_version": CURRENT_SCHEMA_VERSION,
-        "app_version": "v39",
+        "app_version": "v40",
         "board": layout.board_dict(),
         "project": asdict(layout.project),
         "components": [asdict(c) for c in layout.components],

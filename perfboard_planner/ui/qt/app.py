@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
-from PySide6.QtCore import Qt, QSize, QPointF
+from PySide6.QtCore import Qt, QSize, QPointF, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen, QShortcut, QBrush, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
@@ -76,11 +76,14 @@ class CompactTabWidget(QTabWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v39")
+        self.setWindowTitle("Perfboard Planner v40")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
         self.layout_model = Layout()
+        self.is_dirty = False
+        self.recent_component_templates: list[dict] = []
+        self.autosave_path = Path.home() / ".perfboard_planner_recovery.json"
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
         self.max_pin_connections = 2
@@ -90,7 +93,13 @@ class MainWindow(QMainWindow):
         self.muted_warning_signatures: set[str] = set()
         self._build_ui()
         self._wire_events()
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(45_000)
+        self.autosave_timer.timeout.connect(self.autosave_recovery)
+        self.autosave_timer.start()
         self._refresh_all()
+        self._update_window_title()
+        QTimer.singleShot(250, self.maybe_restore_recovery)
 
     def _build_ui(self) -> None:
         self.board = BoardView()
@@ -116,6 +125,15 @@ class MainWindow(QMainWindow):
         self.show_all_colors_btn.setText("All")
         self.show_all_colors_btn.setToolTip("Show all wire colors")
         topbar_layout.addWidget(self.show_all_colors_btn)
+        self.topbar_separator = QLabel("  |  ")
+        self.topbar_separator.setObjectName("MutedLabel")
+        topbar_layout.addWidget(self.topbar_separator)
+        topbar_layout.addWidget(QLabel("Recent parts"))
+        self.recent_parts_area = QWidget()
+        self.recent_parts_layout = QHBoxLayout(self.recent_parts_area)
+        self.recent_parts_layout.setContentsMargins(0, 0, 0, 0)
+        self.recent_parts_layout.setSpacing(5)
+        topbar_layout.addWidget(self.recent_parts_area)
         shell_layout.addWidget(self.canvas_topbar)
 
         shell_layout.addWidget(self.board, 1)
@@ -393,7 +411,9 @@ class MainWindow(QMainWindow):
         self.board.zoomChanged.connect(self.update_zoom_label)
         self.board.annotationRequested.connect(self.create_annotation)
         self.board.itemActivated.connect(lambda kind, idx: self.populate_inspector())
-        self.delete_button.clicked.connect(self.board.delete_selected)
+        self.board.deleteRequested.connect(self.safe_delete_selected)
+        self.board.quickActionRequested.connect(self.handle_quick_action)
+        self.delete_button.clicked.connect(self.safe_delete_selected)
         self.lock_button.clicked.connect(self.toggle_lock_selected)
         self.object_tree.itemClicked.connect(self.select_from_object_tree)
         self.warning_list.itemClicked.connect(self.focus_warning_item)
@@ -465,6 +485,7 @@ class MainWindow(QMainWindow):
             self.undo_stack.pop(0)
         self.redo_stack.clear()
         self._update_undo_actions()
+        self._update_window_title()
 
     def undo(self) -> None:
         if not self.undo_stack:
@@ -473,6 +494,7 @@ class MainWindow(QMainWindow):
         data = self.undo_stack.pop()
         self.layout_model = layout_from_dict(data)
         self.board.set_layout(self.layout_model)
+        self._set_dirty(True)
         self._refresh_all()
 
     def redo(self) -> None:
@@ -482,12 +504,83 @@ class MainWindow(QMainWindow):
         data = self.redo_stack.pop()
         self.layout_model = layout_from_dict(data)
         self.board.set_layout(self.layout_model)
+        self._set_dirty(True)
         self._refresh_all()
 
     def _update_undo_actions(self) -> None:
         self.undo_action.setEnabled(bool(self.undo_stack)); self.redo_action.setEnabled(bool(self.redo_stack))
 
+    def _update_window_title(self) -> None:
+        name = self.current_path.name if self.current_path else (self.layout_model.project.title or "Untitled")
+        dirty = " *" if self.is_dirty else ""
+        self.setWindowTitle(f"{name}{dirty} — Perfboard Planner v40")
+
+    def _set_dirty(self, value: bool = True) -> None:
+        self.is_dirty = bool(value)
+        self._update_window_title()
+
+    def autosave_recovery(self) -> None:
+        if not self.is_dirty:
+            return
+        try:
+            data = layout_to_dict(self.layout_model)
+            data["recovery_source"] = str(self.current_path or "")
+            self.autosave_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            # Autosave should never interrupt editing.
+            pass
+
+    def maybe_restore_recovery(self) -> None:
+        if not self.autosave_path.exists() or self.is_dirty:
+            return
+        try:
+            text = self.autosave_path.read_text(encoding="utf-8")
+            if not text.strip():
+                return
+            reply = QMessageBox.question(
+                self,
+                "Restore recovery file?",
+                "An unsaved recovery layout was found. Restore it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                try:
+                    self.autosave_path.unlink()
+                except Exception:
+                    pass
+                return
+            self.layout_model = layout_from_dict(json.loads(text))
+            self.current_path = None
+            self.board.set_layout(self.layout_model)
+            self.undo_stack.clear(); self.redo_stack.clear()
+            self._set_dirty(True)
+            self._refresh_all()
+            self.statusBar().showMessage("Recovered unsaved layout.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Recovery failed", str(exc))
+
+    def confirm_discard_unsaved(self) -> bool:
+        if not self.is_dirty:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            "This layout has unsaved changes. Continue and discard them?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self.confirm_discard_unsaved():
+            event.accept()
+        else:
+            event.ignore()
+
     def _on_layout_changed(self) -> None:
+        self._set_dirty(True)
+        self._remember_selected_component_template()
         self._refresh_all()
 
     def _refresh_all(self) -> None:
@@ -501,19 +594,25 @@ class MainWindow(QMainWindow):
         self.populate_groups()
         self.populate_warnings()
         self.populate_wire_colors()
+        self.populate_recent_parts()
         self.update_route_button()
         self.populate_bom()
         self.populate_inspector()
         self._update_undo_actions()
 
     def new_file(self) -> None:
-        self.push_undo("New file")
+        if not self.confirm_discard_unsaved():
+            return
         self.layout_model = Layout()
         self.current_path = None
+        self.undo_stack.clear(); self.redo_stack.clear()
         self.board.set_layout(self.layout_model)
+        self._set_dirty(False)
         self._refresh_all()
 
     def open_file(self) -> None:
+        if not self.confirm_discard_unsaved():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Open layout", "", "JSON layout (*.json);;All files (*.*)")
         if not path:
             return
@@ -522,6 +621,7 @@ class MainWindow(QMainWindow):
             self.current_path = Path(path)
             self.board.set_layout(self.layout_model)
             self.undo_stack.clear(); self.redo_stack.clear()
+            self._set_dirty(False)
             self._refresh_all()
         except Exception as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
@@ -531,6 +631,12 @@ class MainWindow(QMainWindow):
             self.save_file_as(); return
         try:
             save_layout_file(self.current_path, self.layout_model)
+            self._set_dirty(False)
+            try:
+                if self.autosave_path.exists():
+                    self.autosave_path.unlink()
+            except Exception:
+                pass
             self.statusBar().showMessage(f"Saved {self.current_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
@@ -543,6 +649,120 @@ class MainWindow(QMainWindow):
             path += ".json"
         self.current_path = Path(path)
         self.save_file()
+
+    def safe_delete_selected(self) -> None:
+        selected = list(self.board.selected)
+        if not selected:
+            return
+        if len(selected) > 1:
+            counts: dict[str, int] = {}
+            for kind, _ in selected:
+                counts[kind] = counts.get(kind, 0) + 1
+            summary = ", ".join(f"{count} {kind}{'s' if count != 1 else ''}" for kind, count in sorted(counts.items()))
+            reply = QMessageBox.question(
+                self,
+                "Delete selected items?",
+                f"Delete {summary}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self.board.delete_selected()
+
+    def handle_quick_action(self, action: str) -> None:
+        if len(self.board.selected) != 1:
+            return
+        kind, idx = next(iter(self.board.selected))
+        if kind != "component" or not (0 <= idx < len(self.layout_model.components)):
+            return
+        comp = self.layout_model.components[idx]
+        if action == "rotate":
+            self.board.rotate_selected()
+        elif action == "side":
+            self._apply_change("Move component to other side", lambda: setattr(comp, "side", "back" if comp.side == "front" else "front"))
+        elif action == "lock":
+            self._apply_change("Toggle component lock", lambda: setattr(comp, "locked", not comp.locked))
+        elif action == "pins":
+            self.edit_component_pins(comp, is_template=False)
+
+    def _component_template_dict(self, comp: Component) -> dict:
+        return {
+            "name": comp.name,
+            "width": comp.width,
+            "height": comp.height,
+            "color": comp.color,
+            "rotation": comp.rotation,
+            "show_name": comp.show_name,
+            "show_pin_names": comp.show_pin_names,
+            "pins": [(p.name, p.row, p.col) for p in comp.pins],
+            "jumpers": [(j.pin_a, j.pin_b, j.color) for j in comp.jumpers],
+            "component_type": comp.component_type,
+            "value": comp.value,
+            "category": comp.category,
+            "orientation_note": comp.orientation_note,
+        }
+
+    def _remember_selected_component_template(self) -> None:
+        selected = list(self.board.selected)
+        if len(selected) != 1 or selected[0][0] != "component":
+            return
+        idx = selected[0][1]
+        if not (0 <= idx < len(self.layout_model.components)):
+            return
+        self.remember_component_template(self.layout_model.components[idx])
+
+    def remember_component_template(self, comp: Component) -> None:
+        data = self._component_template_dict(comp)
+        key = (data["component_type"], data["value"], data["width"], data["height"], tuple(data["pins"]))
+        self.recent_component_templates = [d for d in self.recent_component_templates if (d.get("component_type"), d.get("value"), d.get("width"), d.get("height"), tuple(d.get("pins", []))) != key]
+        self.recent_component_templates.insert(0, data)
+        self.recent_component_templates = self.recent_component_templates[:8]
+        self.populate_recent_parts()
+
+    def load_recent_component_template(self, data: dict) -> None:
+        t = self.board.new_component_template
+        t.name = data.get("name", "Part")
+        # Strip trailing auto-number from recalled names so repeated placement continues R1/R2/etc.
+        prefix, _ = self.board._split_name_prefix_number(t.name)
+        t.name = prefix
+        t.width = int(data.get("width", 3)); t.height = int(data.get("height", 2))
+        t.color = data.get("color", "#ffcc66")
+        t.rotation = int(data.get("rotation", 0))
+        t.show_name = bool(data.get("show_name", True)); t.show_pin_names = bool(data.get("show_pin_names", True))
+        t.pins = [ComponentPin(str(n), int(r), int(c)) for n, r, c in data.get("pins", [])]
+        t.jumpers = [ComponentJumper(str(a), str(b), str(color)) for a, b, color in data.get("jumpers", [])]
+        t.component_type = data.get("component_type", "generic")
+        t.value = data.get("value", "")
+        t.category = data.get("category", "Custom")
+        t.orientation_note = data.get("orientation_note", "")
+        self.set_tool("component")
+        self.statusBar().showMessage(f"Recent component loaded: {t.name}{' · ' + t.value if t.value else ''}")
+
+    def populate_recent_parts(self) -> None:
+        if not hasattr(self, "recent_parts_layout"):
+            return
+        while self.recent_parts_layout.count():
+            item = self.recent_parts_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not self.recent_component_templates:
+            empty = QLabel("None")
+            empty.setObjectName("MutedLabel")
+            self.recent_parts_layout.addWidget(empty)
+            return
+        for data in self.recent_component_templates[:6]:
+            btn = QToolButton()
+            label = data.get("name", "Part")
+            prefix, _ = self.board._split_name_prefix_number(label)
+            value = data.get("value", "")
+            btn.setText(f"{prefix}{(' ' + value) if value else ''}"[:14])
+            btn.setToolTip("Use recent component template")
+            color = QColor(data.get("color", "#ffcc66"))
+            fg = "#ffffff" if color.lightness() < 120 else "#111827"
+            btn.setStyleSheet(f"QToolButton {{background:{color.name()}; color:{fg}; border-radius:8px; padding:4px 8px; font-weight:700; border:1px solid rgba(15,23,42,0.18);}}")
+            btn.clicked.connect(lambda checked=False, d=dict(data): self.load_recent_component_template(d))
+            self.recent_parts_layout.addWidget(btn)
 
     def populate_objects(self) -> None:
         self.object_tree.blockSignals(True); self.object_tree.clear()
@@ -1032,6 +1252,7 @@ class MainWindow(QMainWindow):
     def _apply_change(self, label: str, fn) -> None:
         self.push_undo(label)
         fn()
+        self._set_dirty(True)
         self._refresh_all()
 
     def _inspect_project_and_tools(self) -> None:
@@ -1057,7 +1278,8 @@ class MainWindow(QMainWindow):
             cb_keepouts = QCheckBox("Show current-side keepouts"); cb_keepouts.setChecked(self.board.show_current_keepouts); cb_keepouts.toggled.connect(lambda v: setattr(self.board, "show_current_keepouts", v) or self.board.update())
             cb_other_keepouts = QCheckBox("Ghost opposite-side keepouts"); cb_other_keepouts.setChecked(self.board.show_other_keepouts); cb_other_keepouts.toggled.connect(lambda v: setattr(self.board, "show_other_keepouts", v) or self.board.update())
             cb_cross = QCheckBox("Mouse row/column crosshair"); cb_cross.setChecked(self.board.show_mouse_cross); cb_cross.toggled.connect(lambda v: setattr(self.board, "show_mouse_cross", v) or self.board.update())
-            for cb in [cb_names, cb_pins, cb_counts, cb_other_parts, cb_other_pins, cb_other_wires, cb_keepouts, cb_other_keepouts, cb_cross]:
+            cb_heat = QCheckBox("Warning focus mode"); cb_heat.setChecked(self.board.warning_focus_mode); cb_heat.toggled.connect(lambda v: setattr(self.board, "warning_focus_mode", v) or self.board.update())
+            for cb in [cb_names, cb_pins, cb_counts, cb_other_parts, cb_other_pins, cb_other_wires, cb_keepouts, cb_other_keepouts, cb_cross, cb_heat]:
                 view.addRow(cb)
 
             front_style = self._combo(self.board.front_grid_label_style, ["numbers", "letters", "both"], lambda v: setattr(self.board, "front_grid_label_style", v) or self.board.update())
@@ -1297,6 +1519,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded template: {text}")
 
     def optimize_wire_routes(self, scope: str, allow_cross_side: bool) -> None:
+        before = layout_to_dict(self.layout_model)
+        was_dirty = self.is_dirty
+        undo_len = len(self.undo_stack)
         routed, failed, vias = self.board.optimize_wire_routes(scope=scope, allow_cross_side=allow_cross_side)
         self._refresh_all()
         scope_text = "current side" if scope == "current_side" else "whole board"
@@ -1308,7 +1533,24 @@ class MainWindow(QMainWindow):
             parts.append(f"added {vias} via{'s' if vias != 1 else ''}")
         if failed:
             parts.append(f"{failed} could not be safely routed")
-        self.statusBar().showMessage("Suggest all: " + ", ".join(parts) + ".")
+        summary = "Suggest all: " + ", ".join(parts) + "."
+        if routed or vias:
+            reply = QMessageBox.question(
+                self,
+                "Review suggested routing",
+                summary + "\n\nThe proposed routes are visible on the board now. Keep these changes?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.layout_model = layout_from_dict(before)
+                self.board.set_layout(self.layout_model)
+                self.undo_stack = self.undo_stack[:undo_len]
+                self._set_dirty(was_dirty)
+                self._refresh_all()
+                self.statusBar().showMessage("Suggest all rejected; previous routing restored.")
+                return
+        self.statusBar().showMessage(summary)
 
     def start_route_suggestion(self) -> None:
         self.set_tool("wire")

@@ -25,6 +25,8 @@ class BoardView(QWidget):
     itemActivated = Signal(str, int)
     toolRequested = Signal(str)
     zoomChanged = Signal(float)
+    deleteRequested = Signal()
+    quickActionRequested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,6 +55,7 @@ class BoardView(QWidget):
         self.back_grid_label_style = "numbers"
         self.grid_label_style = "numbers"  # compatibility fallback for old UI code
         self.show_mouse_cross = True
+        self.warning_focus_mode = False
         self.inspector_focus_grid: Optional[GridPoint] = None
         self.highlighted_groups: set[str] = set()
         self.show_component_names = True
@@ -75,6 +78,7 @@ class BoardView(QWidget):
         self.hover_grid: Optional[GridPoint] = None
         self.flip_cue_frames = 0
         self.flip_cue_text = ""
+        self._quick_button_rects: dict[str, QRectF] = {}
 
     def set_layout(self, layout: Layout) -> None:
         self.layout_model = layout
@@ -207,10 +211,13 @@ class BoardView(QWidget):
         self._draw_components(painter, ghost=False)
         self._draw_annotations(painter)
         self._draw_group_outlines(painter)
+        self._draw_tool_preview(painter)
         self._draw_temp_objects(painter)
         self._draw_wire_mode_hint(painter)
+        self._draw_warning_focus_overlay(painter)
         self._draw_warnings(painter)
         self._draw_selection_box(painter)
+        self._draw_selection_quick_controls(painter)
         self._draw_flip_cue(painter)
         painter.end()
 
@@ -1061,6 +1068,138 @@ class BoardView(QWidget):
             painter.drawEllipse(p, max(3.5, 4.5*self.zoom), max(3.5, 4.5*self.zoom))
         painter.restore()
 
+    def _draw_tool_preview(self, painter: QPainter) -> None:
+        """Live placement preview for the active creation tool."""
+        grid = self.hover_grid
+        if not grid:
+            return
+        painter.save()
+        if self.tool == "component":
+            t = self.new_component_template
+            comp = Component(
+                t.name,
+                grid[0],
+                grid[1],
+                t.width,
+                t.height,
+                t.color,
+                side=self.side,
+                rotation=t.rotation,
+                show_name=t.show_name,
+                show_pin_names=t.show_pin_names,
+                pins=[ComponentPin(p.name, p.row, p.col) for p in t.pins],
+                jumpers=[j for j in t.jumpers],
+                component_type=t.component_type,
+                value=t.value,
+                category=t.category,
+                orientation_note=t.orientation_note,
+            )
+            self._draw_component(painter, -1, comp, alpha=0.48, ghost=False)
+            rect = self._component_rect(comp).adjusted(-4, -4, 4, 4)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            invalid = False
+            for r in range(comp.row, comp.row + comp.height):
+                for c in range(comp.col, comp.col + comp.width):
+                    if not board_contains(r, c, self.layout_model.rows, self.layout_model.cols):
+                        invalid = True
+            painter.setPen(QPen(QColor("#ef4444") if invalid else QColor("#2457d6"), 2, Qt.PenStyle.DashLine))
+            painter.drawRoundedRect(rect, 10, 10)
+            painter.setPen(QColor("#0f172a"))
+            painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.drawText(rect.adjusted(8, -22, -8, -4), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, comp.name)
+        elif self.tool == "via":
+            p = self.grid_to_view(*grid)
+            painter.setBrush(self._color("#9c27b0", 0.42))
+            painter.setPen(QPen(QColor("#ffffff"), max(1.5, 2 * self.zoom)))
+            painter.drawEllipse(p, max(6, 8 * self.zoom), max(6, 8 * self.zoom))
+            painter.setBrush(QColor("#ffffff"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(p, max(2, 3 * self.zoom), max(2, 3 * self.zoom))
+        elif self.tool == "annotation":
+            p = self.grid_to_view(*grid)
+            rect = QRectF(p.x(), p.y() - 18 * self.zoom, max(80, 120 * self.zoom), max(24, 34 * self.zoom))
+            painter.setBrush(QColor(255, 255, 255, 185))
+            painter.setPen(QPen(QColor("#0ea5e9"), 1.5, Qt.PenStyle.DashLine))
+            painter.drawRoundedRect(rect, 8, 8)
+            painter.setPen(QColor("#0f172a"))
+            painter.drawText(rect.adjusted(8, 2, -8, -2), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "New note…")
+        elif self.tool == "keepout":
+            if self.keepout_start:
+                p1 = self.grid_to_view(*self.keepout_start)
+                p2 = self.grid_to_view(*grid)
+                rect = QRectF(min(p1.x(), p2.x()), min(p1.y(), p2.y()), abs(p2.x() - p1.x()), abs(p2.y() - p1.y())).adjusted(-9*self.zoom, -9*self.zoom, 9*self.zoom, 9*self.zoom)
+                painter.setBrush(self._color(self.current_keepout_color, 0.14))
+                painter.setPen(QPen(self._color(self.current_keepout_color, 0.92), 2, Qt.PenStyle.DashLine))
+                painter.drawRoundedRect(rect, 10, 10)
+        painter.restore()
+
+    def _draw_warning_focus_overlay(self, painter: QPainter) -> None:
+        """Dim the design so warning markers become the visual focus."""
+        if not self.warning_focus_mode or not self.warning_points:
+            return
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(15, 23, 42, 82))
+        painter.drawRect(self.rect())
+        for r, c in self.warning_points:
+            if not board_contains(r, c, self.layout_model.rows, self.layout_model.cols):
+                continue
+            p = self.grid_to_view(r, c)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.setBrush(Qt.GlobalColor.transparent)
+            painter.drawEllipse(p, max(24, 30*self.zoom), max(24, 30*self.zoom))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.restore()
+
+    def _selection_union_rect(self) -> Optional[QRectF]:
+        rects: list[QRectF] = []
+        for kind, idx in self.selected:
+            rect = self._rect_for_selection_like(kind, idx)
+            if rect is not None:
+                rects.append(rect)
+        if not rects:
+            return None
+        rect = QRectF(rects[0])
+        for other in rects[1:]:
+            rect = rect.united(other)
+        return rect
+
+    def _draw_selection_quick_controls(self, painter: QPainter) -> None:
+        """Small canvas controls for common selected-component actions."""
+        self._quick_button_rects.clear()
+        if self.tool != "select" or len(self.selected) != 1:
+            return
+        kind, idx = next(iter(self.selected))
+        if kind != "component" or not (0 <= idx < len(self.layout_model.components)):
+            return
+        rect = self._component_rect(self.layout_model.components[idx])
+        labels = [("rotate", "⟳"), ("side", "⇄"), ("lock", "🔒" if not self.layout_model.components[idx].locked else "🔓"), ("pins", "Pins")]
+        size = max(28.0, 30.0 * min(self.zoom, 1.25))
+        gap = 6.0
+        total = len(labels) * size + (len(labels) - 1) * gap
+        x = rect.center().x() - total / 2
+        y = rect.top() - size - 14
+        if y < 8:
+            y = rect.bottom() + 14
+        painter.save()
+        painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+        for action, label in labels:
+            brect = QRectF(x, y, size if action != "pins" else size * 1.55, size)
+            self._quick_button_rects[action] = brect
+            painter.setBrush(QColor(255, 255, 255, 235))
+            painter.setPen(QPen(QColor("#2457d6"), 1.4))
+            painter.drawRoundedRect(brect, 9, 9)
+            painter.setPen(QColor("#0f172a"))
+            painter.drawText(brect, Qt.AlignmentFlag.AlignCenter, label)
+            x += brect.width() + gap
+        painter.restore()
+
+    def _quick_action_at(self, pos: QPointF) -> Optional[str]:
+        for action, rect in self._quick_button_rects.items():
+            if rect.contains(pos):
+                return action
+        return None
+
     def _draw_warnings(self, painter: QPainter) -> None:
         painter.setBrush(QColor(239, 68, 68, 55))
         painter.setPen(QPen(QColor("#ef4444"), max(2.0, 2.2*self.zoom)))
@@ -1105,6 +1244,43 @@ class BoardView(QWidget):
                 self.pan += QPointF(0, delta.y() / 2)
         self.update()
 
+    def _split_name_prefix_number(self, name: str) -> tuple[str, Optional[int]]:
+        name = (name or "Part").strip() or "Part"
+        pos = len(name)
+        while pos > 0 and name[pos - 1].isdigit():
+            pos -= 1
+        prefix = name[:pos] or name
+        number = int(name[pos:]) if pos < len(name) else None
+        return prefix, number
+
+    def _next_component_name(self, template_name: str, component_type: str = "") -> str:
+        prefix, explicit_number = self._split_name_prefix_number(template_name)
+        # Treat simple library prefixes as auto-numbering names. If the user has
+        # entered a descriptive name with a number, continue that sequence too.
+        used = []
+        for comp in self.layout_model.components:
+            p, n = self._split_name_prefix_number(comp.name)
+            if p == prefix and n is not None:
+                used.append(n)
+        if used or explicit_number is None:
+            return f"{prefix}{(max(used) + 1) if used else 1}"
+        candidate = f"{prefix}{explicit_number}"
+        if not any(comp.name == candidate for comp in self.layout_model.components):
+            return candidate
+        return f"{prefix}{max(used or [explicit_number]) + 1}"
+
+    def nudge_selected(self, dr: int, dc: int) -> None:
+        if not self.selected:
+            return
+        self._cache_drag_originals()
+        if not self.drag_originals:
+            return
+        self.beforeLayoutChange.emit("Nudge selected")
+        self._apply_drag_delta(dr, dc)
+        self.drag_originals.clear()
+        self.layoutChanged.emit()
+        self.update()
+
     def mousePressEvent(self, event: QMouseEvent):  # noqa: N802
         self.setFocus()
         pos = QPointF(event.position())
@@ -1121,6 +1297,10 @@ class BoardView(QWidget):
             self.statusMessage.emit("Returned to Select mode.")
             return
         if self.tool == "select":
+            quick = self._quick_action_at(pos)
+            if quick:
+                self.quickActionRequested.emit(quick)
+                return
             hit = self.hit_test(pos)
             additive = bool(event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier))
             if hit:
@@ -1147,7 +1327,8 @@ class BoardView(QWidget):
             self.beforeLayoutChange.emit("Add component")
             row, col = grid
             t = self.new_component_template
-            comp = Component(t.name, row, col, t.width, t.height, t.color, side=self.side, rotation=t.rotation, show_name=t.show_name, show_pin_names=t.show_pin_names,
+            comp_name = self._next_component_name(t.name, t.component_type)
+            comp = Component(comp_name, row, col, t.width, t.height, t.color, side=self.side, rotation=t.rotation, show_name=t.show_name, show_pin_names=t.show_pin_names,
                              pins=[ComponentPin(p.name, p.row, p.col) for p in t.pins], jumpers=list(t.jumpers), component_type=t.component_type, value=t.value, category=t.category, orientation_note=t.orientation_note)
             self.layout_model.components.append(comp)
             self.selected = {("component", len(self.layout_model.components)-1)}
@@ -1226,7 +1407,16 @@ class BoardView(QWidget):
 
     def keyPressEvent(self, event):  # noqa: N802
         if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
-            self.delete_selected()
+            self.deleteRequested.emit()
+        elif event.key() in {Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down}:
+            step = 5 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+            delta = {
+                Qt.Key.Key_Left: (0, -step),
+                Qt.Key.Key_Right: (0, step),
+                Qt.Key.Key_Up: (-step, 0),
+                Qt.Key.Key_Down: (step, 0),
+            }[event.key()]
+            self.nudge_selected(*delta)
         elif event.key() == Qt.Key.Key_Escape:
             self.temp_wire.clear(); self.keepout_start = None
             self.route_suggestion_active = False; self.route_suggestion_points.clear()
