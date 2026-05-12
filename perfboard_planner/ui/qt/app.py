@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize, QPointF
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -49,7 +49,6 @@ from PySide6.QtWidgets import (
 from ...core.bom import bom_csv, bom_rows
 from ...core.checks import LayoutWarning, layout_warnings, pin_connection_counts
 from ...core.models import Annotation, Component, ComponentJumper, ComponentPin, KeepoutZone, Layout, Via, Wire
-from ...core.routing import simple_dogleg_route
 from ...core.storage import layout_from_dict, layout_to_dict, load_layout_file, save_layout_file
 from .board_view import BoardView, Selection
 from .style import APP_STYLESHEET
@@ -58,7 +57,7 @@ from .style import APP_STYLESHEET
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v31")
+        self.setWindowTitle("Perfboard Planner v32")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
@@ -106,6 +105,17 @@ class MainWindow(QMainWindow):
         footer_layout = QHBoxLayout(self.canvas_footer)
         footer_layout.setContentsMargins(10, 6, 10, 6)
         footer_layout.setSpacing(6)
+
+        footer_layout.addWidget(QLabel("Side"))
+        self.front_side_button = QToolButton(); self.front_side_button.setText("Front"); self.front_side_button.setCheckable(True); self.front_side_button.setChecked(True); self.front_side_button.setToolTip("Show the front side")
+        self.back_side_button = QToolButton(); self.back_side_button.setText("Back"); self.back_side_button.setCheckable(True); self.back_side_button.setToolTip("Show the physically mirrored back side")
+        self.side_button_group = QActionGroup(self); self.side_button_group.setExclusive(True)
+        self.front_side_action = QAction("Front", self); self.front_side_action.setCheckable(True); self.front_side_action.setChecked(True)
+        self.back_side_action = QAction("Back", self); self.back_side_action.setCheckable(True)
+        self.side_button_group.addAction(self.front_side_action); self.side_button_group.addAction(self.back_side_action)
+        self.front_side_button.setDefaultAction(self.front_side_action); self.back_side_button.setDefaultAction(self.back_side_action)
+        footer_layout.addWidget(self.front_side_button); footer_layout.addWidget(self.back_side_button)
+
         footer_layout.addStretch(1)
         self.zoom_out_button = QToolButton(); self.zoom_out_button.setText("−"); self.zoom_out_button.setToolTip("Zoom out")
         self.zoom_label = QLabel("100%")
@@ -189,12 +199,6 @@ class MainWindow(QMainWindow):
         self.mode_actions["select"].setChecked(True)
         toolbar.addSeparator()
 
-        self.front_action = QAction(self._simple_icon("#2563eb", "rect"), "Front", self); self.front_action.setCheckable(True); self.front_action.setChecked(True)
-        self.back_action = QAction(self._simple_icon("#f59e0b", "rect"), "Back", self); self.back_action.setCheckable(True)
-        self.side_group = QActionGroup(self); self.side_group.addAction(self.front_action); self.side_group.addAction(self.back_action)
-        toolbar.addAction(self.front_action); toolbar.addAction(self.back_action)
-        toolbar.addSeparator()
-
         self.warnings_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning), "Warnings", self)
         self.bom_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "BOM", self)
         toolbar.addAction(self.warnings_action); toolbar.addAction(self.bom_action)
@@ -259,8 +263,8 @@ class MainWindow(QMainWindow):
         self.undo_action.triggered.connect(self.undo)
         self.redo_action.triggered.connect(self.redo)
         self.mode_group.triggered.connect(lambda action: self.set_tool(action.data()))
-        self.front_action.triggered.connect(lambda: self.set_side("front"))
-        self.back_action.triggered.connect(lambda: self.set_side("back"))
+        self.front_side_action.triggered.connect(lambda: self.set_side("front"))
+        self.back_side_action.triggered.connect(lambda: self.set_side("back"))
         self.warnings_action.triggered.connect(lambda: self.left_tabs.setCurrentIndex(1))
         self.bom_action.triggered.connect(self.show_bom_dialog)
         self.board.beforeLayoutChange.connect(self.push_undo)
@@ -281,6 +285,9 @@ class MainWindow(QMainWindow):
         self.zoom_in_button.clicked.connect(lambda: self.board.zoom_in())
         self.zoom_reset_button.clicked.connect(lambda: self.board.reset_zoom())
         self.zoom_fit_button.clicked.connect(self.board.fit_to_view)
+        self.escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.escape_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.escape_shortcut.activated.connect(lambda: self.set_tool("select"))
 
     def update_zoom_label(self, zoom: float) -> None:
         if hasattr(self, "zoom_label"):
@@ -294,9 +301,12 @@ class MainWindow(QMainWindow):
         self.populate_inspector()
 
     def set_side(self, side: str) -> None:
+        previous_side = getattr(self.board, "side", "front")
         self.board.set_side(side)
-        self.front_action.setChecked(side == "front")
-        self.back_action.setChecked(side == "back")
+        self.front_side_action.setChecked(side == "front")
+        self.back_side_action.setChecked(side == "back")
+        if previous_side != side and hasattr(self.board, "start_flip_animation"):
+            self.board.start_flip_animation(side)
         self.statusBar().showMessage(f"Viewing {side}; back side is physically mirrored")
         self.populate_inspector()
 
@@ -581,6 +591,66 @@ class MainWindow(QMainWindow):
         btn.clicked.connect(choose)
         return btn
 
+    def used_wire_colors(self) -> list[str]:
+        colors = []
+        for wire in self.layout_model.wires:
+            color = wire.color or "#d00000"
+            if color not in colors:
+                colors.append(color)
+        return sorted(colors, key=str.lower)
+
+    def _wire_color_selector(self, value: str, changed) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        current = QPushButton(value)
+        current.setMinimumWidth(86)
+
+        def apply_style(color_text: str) -> None:
+            qcolor = QColor(color_text or "#d00000")
+            fg = "#fff" if qcolor.lightness() < 120 else "#111827"
+            current.setText(color_text)
+            current.setStyleSheet(f"background:{color_text}; color:{fg}; border-radius:8px; padding:8px; font-weight:700;")
+
+        def apply_color(color_text: str) -> None:
+            if not color_text:
+                return
+            apply_style(color_text)
+            changed(color_text)
+            self.populate_wire_colors()
+            self.board.update()
+
+        apply_style(value)
+        current.clicked.connect(lambda: choose_custom())
+        layout.addWidget(current)
+
+        for color_text in self.used_wire_colors():
+            swatch = QToolButton()
+            swatch.setFixedSize(28, 26)
+            swatch.setToolTip(f"Use existing wire color {color_text}")
+            qcolor = QColor(color_text)
+            mark = "✓" if color_text.lower() == value.lower() else ""
+            swatch.setText(mark)
+            fg = "#fff" if qcolor.lightness() < 120 else "#111827"
+            swatch.setStyleSheet(f"QToolButton {{background:{color_text}; color:{fg}; border:1px solid #64748b; border-radius:7px; font-weight:900;}} QToolButton:hover {{border:2px solid #2457d6;}}")
+            swatch.clicked.connect(lambda checked=False, c=color_text: apply_color(c))
+            layout.addWidget(swatch)
+
+        more = QToolButton()
+        more.setText("…")
+        more.setToolTip("Choose a custom wire color")
+        layout.addWidget(more)
+
+        def choose_custom() -> None:
+            color = QColorDialog.getColor(QColor(value), self, "Choose wire color")
+            if color.isValid():
+                apply_color(color.name())
+
+        more.clicked.connect(choose_custom)
+        layout.addStretch(1)
+        return row
+
     def _apply_change(self, label: str, fn) -> None:
         self.push_undo(label)
         fn()
@@ -622,9 +692,10 @@ class MainWindow(QMainWindow):
         newpart.addRow(pins_btn)
 
         _, wire = self._card("New wire")
-        wire.addRow("Color", self._color_button(self.board.current_wire_color, lambda v: setattr(self.board, "current_wire_color", v)))
-        route_btn = QPushButton("Suggest dogleg route between two selected vias/pins")
-        route_btn.clicked.connect(self.suggest_route_dialog)
+        wire.addRow("Color", self._wire_color_selector(self.board.current_wire_color, lambda v: setattr(self.board, "current_wire_color", v)))
+        route_btn = QPushButton("Suggest route: click two board points")
+        route_btn.setToolTip("Enter route-suggestion mode, then click a start hole and a destination hole on the board.")
+        route_btn.clicked.connect(self.start_route_suggestion)
         wire.addRow(route_btn)
 
     def _set_pin_limit(self, value: int) -> None:
@@ -662,7 +733,7 @@ class MainWindow(QMainWindow):
         _, form = self._card("Wire")
         form.addRow("Name", self._line(wire.name, lambda v: self._apply_change("Edit wire", lambda: setattr(wire, "name", v))))
         form.addRow("Side", self._combo(wire.side, ["front", "back"], lambda v: self._apply_change("Move wire side", lambda: setattr(wire, "side", v))))
-        form.addRow("Color", self._color_button(wire.color, lambda v: self._apply_change("Wire color", lambda: setattr(wire, "color", v))))
+        form.addRow("Color", self._wire_color_selector(wire.color, lambda v: self._apply_change("Wire color", lambda: setattr(wire, "color", v))))
         locked = QCheckBox("Locked"); locked.setChecked(wire.locked); locked.toggled.connect(lambda v: self._apply_change("Lock wire", lambda: setattr(wire, "locked", bool(v))))
         form.addRow(locked)
         form.addRow("Group", self._line(wire.group, lambda v: self._apply_change("Set group", lambda: setattr(wire, "group", v))))
@@ -789,21 +860,14 @@ class MainWindow(QMainWindow):
         self.set_tool("component"); self.populate_inspector()
         self.statusBar().showMessage(f"Loaded template: {text}")
 
+    def start_route_suggestion(self) -> None:
+        self.set_tool("wire")
+        self.board.start_route_suggestion()
+        self.statusBar().showMessage("Suggest route: click the start hole, then the destination hole.")
+
     def suggest_route_dialog(self) -> None:
-        selected_points = []
-        for kind, idx in self.board.selected:
-            if kind == "via" and idx < len(self.layout_model.vias):
-                v = self.layout_model.vias[idx]; selected_points.append((v.row, v.col))
-            elif kind == "wire" and idx < len(self.layout_model.wires):
-                selected_points.extend(self.layout_model.wires[idx].points[:1])
-        if len(selected_points) < 2:
-            QMessageBox.information(self, "Suggest route", "Select two vias or a wire endpoint first. The helper creates a simple dogleg route.")
-            return
-        self.push_undo("Suggest route")
-        points = simple_dogleg_route(selected_points[0], selected_points[1])
-        self.layout_model.wires.append(Wire("", points, self.board.current_wire_color, side=self.board.side))
-        self.board.selected = {("wire", len(self.layout_model.wires)-1)}
-        self._refresh_all()
+        # Backwards-compatible alias for older UI hookups.
+        self.start_route_suggestion()
 
 
 class BomDialog(QDialog):

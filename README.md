@@ -1,6 +1,6 @@
-# Perfboard Planner v31
+# Perfboard Planner v32
 
-v31 refines the first Qt rewrite with a cleaner canvas header/footer, compact wire-color swatches, a visual pin editor, mode border cues, and BOM as a dedicated window instead of a dock tab. The older Tkinter UI is still included as a fallback.
+v32 refines the Qt workflow: wire color editing now offers existing used colors, Escape returns to Select mode, Front/Back controls live in the canvas footer opposite the zoom controls with a small flip cue, keepouts no longer move in Select mode, and route suggestion now works by clicking two board holes. The older Tkinter UI is still included as a fallback.
 
 ## Install
 
@@ -23,13 +23,13 @@ python run_qt.py
 python run_tk.py
 ```
 
-## New v31 UI direction
+## Current Qt UI direction
 
 The app now uses a modern editor layout:
 
-- top toolbar for file actions, undo/redo, modes, side selection, warnings, and BOM
+- top toolbar for file actions, undo/redo, modes, warnings, and BOM
 - central zoomable board canvas with a wire-color swatch rail above it
-- bottom-right zoom controls below the canvas
+- bottom footer with Front/Back controls on the left and zoom controls on the right
 - left dock for objects, warnings, and footprint library
 - right inspector for editing selected objects and project settings
 - visual pin-layout editor for component pins and internal jumpers
@@ -45,11 +45,12 @@ The back side is still shown as a physical mirrored view by default.
 - middle/right drag pans the board in Select mode
 - Select mode: click objects, Shift/Ctrl-click for multi-select, drag to move
 - Part mode: click a hole to place the current component template
-- Wire mode: click start, Shift-click bends, normal click finishes
+- Wire mode: click start, Shift-click bends, normal click finishes; the route helper lets you click two board holes to create a suggested dogleg route
 - Via mode: click a hole to toggle a front/back via
 - Note mode: click a hole to add an annotation
 - Keepout mode: click two corners to create a keepout zone
 - `Delete`/`Backspace` deletes selected unlocked items
+- `Esc` exits back to Select mode
 - `R` rotates selected components visually
 
 ## Architecture

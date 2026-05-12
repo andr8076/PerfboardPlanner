@@ -1,6 +1,6 @@
-"""Perfboard Planner v31.
+"""Perfboard Planner v32.
 
-Qt UI refinement pass on top of the refactored core package.
+Qt workflow refinement pass on top of the refactored core package.
 """
 
-__version__ = "31.0"
+__version__ = "32.0"

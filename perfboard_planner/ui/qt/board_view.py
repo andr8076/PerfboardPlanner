@@ -3,12 +3,13 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QBrush, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from ...core.geometry import board_contains, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment
 from ...core.models import Annotation, Component, ComponentPin, KeepoutZone, Layout, Via, Wire
+from ...core.routing import simple_dogleg_route
 
 Selection = Tuple[str, int]
 GridPoint = Tuple[int, int]
@@ -49,18 +50,24 @@ class BoardView(QWidget):
         self.new_component_template = Component("Part", 0, 0, 3, 2, "#ffcc66")
         self.current_wire_color = "#d00000"
         self.current_keepout_color = "#ef4444"
+        self.route_suggestion_active = False
+        self.route_suggestion_points: list[GridPoint] = []
         self.dragging_view = False
         self.drag_last_pos = QPointF()
         self.drag_start_grid: Optional[GridPoint] = None
         self.drag_originals: dict[Selection, object] = {}
         self._drag_snapshot_taken = False
         self.hover_grid: Optional[GridPoint] = None
+        self.flip_cue_frames = 0
+        self.flip_cue_text = ""
 
     def set_layout(self, layout: Layout) -> None:
         self.layout_model = layout
         self.selected.clear()
         self.temp_wire.clear()
         self.keepout_start = None
+        self.route_suggestion_active = False
+        self.route_suggestion_points.clear()
         self.update()
         self.selectionChanged.emit()
 
@@ -68,13 +75,37 @@ class BoardView(QWidget):
         self.tool = tool
         if tool != "wire":
             self.temp_wire.clear()
+            self.route_suggestion_active = False
+            self.route_suggestion_points.clear()
         if tool != "keepout":
             self.keepout_start = None
+        self.update()
+
+    def start_route_suggestion(self) -> None:
+        self.set_tool("wire")
+        self.route_suggestion_active = True
+        self.route_suggestion_points.clear()
+        self.temp_wire.clear()
+        self.statusMessage.emit("Suggest route: click the start hole, then the destination hole.")
+        self.toolRequested.emit("wire")
         self.update()
 
     def set_side(self, side: str) -> None:
         self.side = side if side in {"front", "back"} else "front"
         self.update()
+
+    def start_flip_animation(self, side: str) -> None:
+        self.flip_cue_text = "Front side" if side == "front" else "Back side · mirrored"
+        self.flip_cue_frames = 12
+        self._tick_flip_animation()
+
+    def _tick_flip_animation(self) -> None:
+        if self.flip_cue_frames <= 0:
+            self.update()
+            return
+        self.flip_cue_frames -= 1
+        self.update()
+        QTimer.singleShot(28, self._tick_flip_animation)
 
     def fit_to_view(self) -> None:
         if self.layout_model.cols <= 0 or self.layout_model.rows <= 0:
@@ -140,14 +171,37 @@ class BoardView(QWidget):
         self._draw_components(painter, ghost=False)
         self._draw_annotations(painter)
         self._draw_temp_objects(painter)
+        self._draw_wire_mode_hint(painter)
         self._draw_warnings(painter)
         self._draw_selection_box(painter)
+        self._draw_flip_cue(painter)
         painter.end()
 
     def _color(self, value: str, alpha: float = 1.0) -> QColor:
         color = QColor(value or "#000000")
         color.setAlphaF(max(0.0, min(1.0, alpha)))
         return color
+
+    def _draw_flip_cue(self, painter: QPainter) -> None:
+        if self.flip_cue_frames <= 0:
+            return
+        alpha = int(30 + 150 * (self.flip_cue_frames / 12))
+        w = min(360, max(220, self.width() // 4))
+        h = 64
+        x = (self.width() - w) / 2
+        y = 24
+        rect = QRectF(x, y, w, h)
+        painter.setPen(Qt.PenStyle.NoPen)
+        bg = QColor(15, 23, 42, alpha)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 20, 20)
+        painter.setPen(QPen(QColor(255, 255, 255, max(120, alpha)), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        center_y = y + h / 2
+        painter.drawArc(QRectF(x + 22, y + 14, 44, 36), 35 * 16, 285 * 16)
+        painter.drawLine(QPointF(x + 61, center_y - 14), QPointF(x + 72, center_y - 6))
+        painter.drawLine(QPointF(x + 61, center_y - 14), QPointF(x + 61, center_y - 1))
+        painter.setFont(QFont("Segoe UI", max(11, int(14 * self.zoom)), QFont.Weight.Bold))
+        painter.drawText(rect.adjusted(90, 0, -16, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.flip_cue_text)
 
     def _draw_shadow_panel(self, painter: QPainter) -> None:
         x1, y1 = self.grid_to_view(0, 0).x() - 28 * self.zoom, self.grid_to_view(0, 0).y() - 28 * self.zoom
@@ -355,6 +409,35 @@ class BoardView(QWidget):
             painter.setPen(QPen(self._color(self.current_keepout_color, 0.9), 2, Qt.PenStyle.DashLine))
             painter.drawEllipse(p, 8*self.zoom, 8*self.zoom)
 
+    def _draw_wire_mode_hint(self, painter: QPainter) -> None:
+        if self.tool != "wire":
+            return
+        p1 = self.grid_to_view(0, 0)
+        p2 = self.grid_to_view(self.layout_model.rows - 1, self.layout_model.cols - 1)
+        x = min(p1.x(), p2.x()) - 18 * self.zoom
+        y = max(p1.y(), p2.y()) + 38 * self.zoom
+        text = "Suggest route: click start + end" if self.route_suggestion_active else "Wire mode · click start/end · Shift-click bends · Suggest route available"
+        rect = QRectF(x, y, max(260, len(text) * 7.2), 34)
+        painter.setPen(QPen(QColor("#ef4444"), 1.4))
+        painter.setBrush(QColor(255, 255, 255, 235))
+        painter.drawRoundedRect(rect, 10, 10)
+        painter.setPen(QColor("#111827"))
+        painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        painter.drawText(rect.adjusted(12, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+
+        if self.route_suggestion_active and self.route_suggestion_points:
+            start = self.route_suggestion_points[0]
+            end = self.hover_grid or start
+            route = simple_dogleg_route(start, end)
+            pts = [self.grid_to_view(r, c) for r, c in route]
+            painter.setPen(QPen(self._color(self.current_wire_color, 0.55), max(2.5, 4 * self.zoom), Qt.PenStyle.DashLine))
+            for a, b in zip(pts, pts[1:]):
+                painter.drawLine(a, b)
+            for p in pts:
+                painter.setBrush(self._color(self.current_wire_color, 0.75))
+                painter.setPen(QPen(QColor("#ffffff"), 1.2))
+                painter.drawEllipse(p, max(3.5, 4.5*self.zoom), max(3.5, 4.5*self.zoom))
+
     def _draw_warnings(self, painter: QPainter) -> None:
         painter.setBrush(QColor(239, 68, 68, 55))
         painter.setPen(QPen(QColor("#ef4444"), max(2.0, 2.2*self.zoom)))
@@ -447,7 +530,10 @@ class BoardView(QWidget):
             self.selected = {("component", len(self.layout_model.components)-1)}
             self.layoutChanged.emit(); self.selectionChanged.emit(); self.update(); return
         if self.tool == "wire":
-            self._handle_wire_click(grid, event.modifiers())
+            if self.route_suggestion_active:
+                self._handle_route_suggestion_click(grid)
+            else:
+                self._handle_wire_click(grid, event.modifiers())
             return
         if self.tool == "via":
             self.beforeLayoutChange.emit("Toggle via")
@@ -516,7 +602,12 @@ class BoardView(QWidget):
         if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
             self.delete_selected()
         elif event.key() == Qt.Key.Key_Escape:
-            self.temp_wire.clear(); self.keepout_start = None; self.update()
+            self.temp_wire.clear(); self.keepout_start = None
+            self.route_suggestion_active = False; self.route_suggestion_points.clear()
+            self.set_tool("select")
+            self.toolRequested.emit("select")
+            self.statusMessage.emit("Returned to Select mode.")
+            self.update()
         elif event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter} and self.tool == "wire":
             self.finish_temp_wire()
         elif event.key() == Qt.Key.Key_R:
@@ -562,6 +653,25 @@ class BoardView(QWidget):
             if rect.contains(pos):
                 return ("keepout", i)
         return None
+
+    def _handle_route_suggestion_click(self, grid: GridPoint) -> None:
+        if not self.route_suggestion_points:
+            self.route_suggestion_points = [grid]
+            self.statusMessage.emit("Route start set. Click the destination hole.")
+            self.update()
+            return
+        start = self.route_suggestion_points[0]
+        if start == grid:
+            self.statusMessage.emit("Choose a different destination hole for the suggested route.")
+            return
+        route = simple_dogleg_route(start, grid)
+        self.beforeLayoutChange.emit("Suggest route")
+        self.layout_model.wires.append(Wire("", route, self.current_wire_color, side=self.side))
+        self.selected = {("wire", len(self.layout_model.wires)-1)}
+        self.route_suggestion_points.clear()
+        self.route_suggestion_active = False
+        self.layoutChanged.emit(); self.selectionChanged.emit(); self.update()
+        self.statusMessage.emit("Suggested wire added.")
 
     def _handle_wire_click(self, grid: GridPoint, modifiers) -> None:
         if not self.temp_wire:
@@ -646,7 +756,7 @@ class BoardView(QWidget):
             elif sel[0] == "annotation":
                 self.drag_originals[sel] = (item.row, item.col)
             elif sel[0] == "keepout":
-                self.drag_originals[sel] = (item.row1, item.col1, item.row2, item.col2)
+                continue
 
     def _apply_drag_delta(self, dr: int, dc: int) -> None:
         for sel, original in self.drag_originals.items():
@@ -662,7 +772,3 @@ class BoardView(QWidget):
             elif sel[0] in {"via", "annotation"}:
                 row, col = original
                 item.row = max(0, min(self.layout_model.rows-1, row+dr)); item.col = max(0, min(self.layout_model.cols-1, col+dc))
-            elif sel[0] == "keepout":
-                r1,c1,r2,c2 = original
-                item.row1=max(0,min(self.layout_model.rows-1,r1+dr)); item.col1=max(0,min(self.layout_model.cols-1,c1+dc))
-                item.row2=max(0,min(self.layout_model.rows-1,r2+dr)); item.col2=max(0,min(self.layout_model.cols-1,c2+dc))
