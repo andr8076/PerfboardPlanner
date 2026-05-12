@@ -1,6 +1,6 @@
-"""Perfboard Planner v32.
+"""Perfboard Planner v33.
 
-Qt workflow refinement pass on top of the refactored core package.
+Qt workflow cleanup: context-aware routing, contextual tool settings, useful groups/modules, and muted warnings.
 """
 
-__version__ = "32.0"
+__version__ = "33.0"

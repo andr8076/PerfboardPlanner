@@ -37,6 +37,7 @@ class BoardView(QWidget):
         self.margin = 42.0
         self.selected: set[Selection] = set()
         self.hidden_wire_colors: set[str] = set()
+        self.hidden_groups: set[str] = set()
         self.show_other_parts = True
         self.show_other_pins = True
         self.show_other_wires = True
@@ -63,6 +64,7 @@ class BoardView(QWidget):
 
     def set_layout(self, layout: Layout) -> None:
         self.layout_model = layout
+        self.hidden_groups.clear()
         self.selected.clear()
         self.temp_wire.clear()
         self.keepout_start = None
@@ -170,6 +172,7 @@ class BoardView(QWidget):
         self._draw_wires(painter, ghost=False)
         self._draw_components(painter, ghost=False)
         self._draw_annotations(painter)
+        self._draw_group_outlines(painter)
         self._draw_temp_objects(painter)
         self._draw_wire_mode_hint(painter)
         self._draw_warnings(painter)
@@ -248,8 +251,124 @@ class BoardView(QWidget):
                 painter.setPen(QPen(QColor("#64748b"), max(1.0, 1 * self.zoom)))
                 painter.drawEllipse(p, radius, radius)
 
+    def _is_item_hidden_by_group(self, item) -> bool:
+        group = getattr(item, "group", "")
+        return bool(group and group in self.hidden_groups)
+
+    def _snap_grid_for_wire(self, pos: QPointF) -> Optional[GridPoint]:
+        """Prefer visible component pins before raw hole snapping.
+
+        The normal board-hole snap is intentionally precise. In wire mode the
+        user is often aiming at a drawn pin marker or its tiny label, so this
+        uses a slightly larger, context-aware target around component pins and
+        then falls back to normal hole snapping.
+        """
+        raw_grid = self.view_to_grid(pos)
+        best: Optional[GridPoint] = None
+        # A pin marker is visually larger than the underlying hole. Allow enough
+        # radius to hit the marker/label area, but still choose the nearest pin.
+        base_radius = max(16.0, self.layout_model.spacing * self.zoom * 0.9)
+        best_dist = float("inf")
+        for comp in self.layout_model.components:
+            if comp.side != self.side or self._is_item_hidden_by_group(comp):
+                continue
+            # If the click is around the component body, be more willing to snap
+            # to one of its pins. This avoids suggested routes landing on the
+            # nearest ordinary board hole instead of the intended component pin.
+            near_component = self._component_rect(comp).adjusted(-28 * self.zoom, -28 * self.zoom, 28 * self.zoom, 28 * self.zoom).contains(pos)
+            local_limit = max(base_radius, self.layout_model.spacing * self.zoom * (1.35 if near_component else 0.9))
+            for pin in comp.pins:
+                r, c = component_pin_absolute(comp, pin)
+                if not board_contains(r, c, self.layout_model.rows, self.layout_model.cols):
+                    continue
+                point = self.grid_to_view(r, c)
+                dist = math.hypot(pos.x() - point.x(), pos.y() - point.y())
+                if dist <= local_limit and dist < best_dist:
+                    best_dist = dist
+                    best = (r, c)
+        return best or raw_grid
+
+    def _segment_grid_points(self, a: GridPoint, b: GridPoint) -> list[GridPoint]:
+        ar, ac = a; br, bc = b
+        if ar == br:
+            step = 1 if bc >= ac else -1
+            return [(ar, c) for c in range(ac, bc + step, step)]
+        if ac == bc:
+            step = 1 if br >= ar else -1
+            return [(r, ac) for r in range(ar, br + step, step)]
+        return [a, b]
+
+    def _route_penalty(self, route: Sequence[GridPoint]) -> int:
+        penalty = 0
+        endpoints = {route[0], route[-1]} if route else set()
+        body_cells: set[GridPoint] = set()
+        for comp in self.layout_model.components:
+            if comp.side != self.side or self._is_item_hidden_by_group(comp):
+                continue
+            for r in range(comp.row, comp.row + comp.height):
+                for c in range(comp.col, comp.col + comp.width):
+                    if board_contains(r, c, self.layout_model.rows, self.layout_model.cols):
+                        body_cells.add((r, c))
+        keepout_cells: set[GridPoint] = set()
+        for zone in self.layout_model.keepouts:
+            if self._is_item_hidden_by_group(zone) or zone.side not in {"both", self.side}:
+                continue
+            r1, r2 = sorted((zone.row1, zone.row2)); c1, c2 = sorted((zone.col1, zone.col2))
+            for r in range(r1, r2 + 1):
+                for c in range(c1, c2 + 1):
+                    if board_contains(r, c, self.layout_model.rows, self.layout_model.cols):
+                        keepout_cells.add((r, c))
+        visited: set[GridPoint] = set()
+        for a, b in zip(route, route[1:]):
+            for pt in self._segment_grid_points(a, b):
+                if pt in visited:
+                    continue
+                visited.add(pt)
+                if pt in endpoints:
+                    continue
+                if pt in body_cells:
+                    penalty += 50
+                if pt in keepout_cells:
+                    penalty += 80
+        penalty += max(0, len(route) - 2)
+        return penalty
+
+    def _suggest_route(self, start: GridPoint, end: GridPoint) -> list[GridPoint]:
+        if start == end:
+            return [start]
+        sr, sc = start; er, ec = end
+        candidates: list[list[GridPoint]] = []
+        if sr == er or sc == ec:
+            candidates.append([start, end])
+        candidates.append([start, (sr, ec), end])
+        candidates.append([start, (er, sc), end])
+        # A couple of outside-lane candidates help when one dogleg would cut
+        # through a component body.
+        for rr in [max(0, min(sr, er) - 1), min(self.layout_model.rows - 1, max(sr, er) + 1)]:
+            candidates.append([start, (rr, sc), (rr, ec), end])
+        for cc in [max(0, min(sc, ec) - 1), min(self.layout_model.cols - 1, max(sc, ec) + 1)]:
+            candidates.append([start, (sr, cc), (er, cc), end])
+        # Remove duplicate consecutive points and invalid candidates.
+        cleaned: list[list[GridPoint]] = []
+        for route in candidates:
+            compact: list[GridPoint] = []
+            for pt in route:
+                if compact and compact[-1] == pt:
+                    continue
+                if not board_contains(pt[0], pt[1], self.layout_model.rows, self.layout_model.cols):
+                    break
+                compact.append(pt)
+            else:
+                if len(compact) >= 2 and compact not in cleaned:
+                    cleaned.append(compact)
+        if not cleaned:
+            return simple_dogleg_route(start, end)
+        return min(cleaned, key=lambda route: (self._route_penalty(route), len(route)))
+
     def _draw_components(self, painter: QPainter, *, ghost: bool) -> None:
         for i, comp in enumerate(self.layout_model.components):
+            if self._is_item_hidden_by_group(comp):
+                continue
             is_current = comp.side == self.side
             if ghost and (is_current or not self.show_other_parts):
                 continue
@@ -313,6 +432,8 @@ class BoardView(QWidget):
 
     def _draw_wires(self, painter: QPainter, *, ghost: bool) -> None:
         for i, wire in enumerate(self.layout_model.wires):
+            if self._is_item_hidden_by_group(wire):
+                continue
             is_current = wire.side == self.side
             if wire.color in self.hidden_wire_colors:
                 continue
@@ -354,6 +475,8 @@ class BoardView(QWidget):
 
     def _draw_vias(self, painter: QPainter) -> None:
         for i, via in enumerate(self.layout_model.vias):
+            if self._is_item_hidden_by_group(via):
+                continue
             if not board_contains(via.row, via.col, self.layout_model.rows, self.layout_model.cols):
                 continue
             p = self.grid_to_view(via.row, via.col)
@@ -367,6 +490,8 @@ class BoardView(QWidget):
 
     def _draw_annotations(self, painter: QPainter) -> None:
         for i, note in enumerate(self.layout_model.annotations):
+            if self._is_item_hidden_by_group(note):
+                continue
             if note.side != self.side:
                 continue
             p = self.grid_to_view(note.row, note.col)
@@ -380,6 +505,8 @@ class BoardView(QWidget):
 
     def _draw_keepouts(self, painter: QPainter, *, ghost: bool) -> None:
         for i, zone in enumerate(self.layout_model.keepouts):
+            if self._is_item_hidden_by_group(zone):
+                continue
             applies = zone.side == "both" or zone.side == self.side
             if ghost or not applies:
                 continue
@@ -392,6 +519,72 @@ class BoardView(QWidget):
             painter.drawRoundedRect(rect, 10, 10)
             painter.setPen(self._color(zone.color, 0.95))
             painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, zone.name)
+
+    def _group_outline_color(self, group: str) -> QColor:
+        palette = ["#2563eb", "#7c3aed", "#db2777", "#ea580c", "#059669", "#0891b2"]
+        return QColor(palette[abs(hash(group)) % len(palette)])
+
+    def _rect_for_selection_like(self, kind: str, idx: int) -> Optional[QRectF]:
+        if kind == "component" and 0 <= idx < len(self.layout_model.components):
+            comp = self.layout_model.components[idx]
+            if comp.side == self.side:
+                return self._component_rect(comp)
+        if kind == "wire" and 0 <= idx < len(self.layout_model.wires):
+            wire = self.layout_model.wires[idx]
+            if wire.side == self.side and wire.points:
+                pts = [self.grid_to_view(r, c) for r, c in wire.points if board_contains(r, c, self.layout_model.rows, self.layout_model.cols)]
+                if pts:
+                    xs = [p.x() for p in pts]; ys = [p.y() for p in pts]
+                    pad = max(10, 8 * self.zoom)
+                    return QRectF(min(xs)-pad, min(ys)-pad, max(xs)-min(xs)+2*pad, max(ys)-min(ys)+2*pad)
+        if kind == "via" and 0 <= idx < len(self.layout_model.vias):
+            via = self.layout_model.vias[idx]
+            p = self.grid_to_view(via.row, via.col)
+            pad = max(10, 8 * self.zoom)
+            return QRectF(p.x()-pad, p.y()-pad, pad*2, pad*2)
+        if kind == "annotation" and 0 <= idx < len(self.layout_model.annotations):
+            note = self.layout_model.annotations[idx]
+            if note.side == self.side:
+                p = self.grid_to_view(note.row, note.col)
+                return QRectF(p.x(), p.y()-18*self.zoom, max(60, 120*self.zoom), max(22,34*self.zoom))
+        if kind == "keepout" and 0 <= idx < len(self.layout_model.keepouts):
+            zone = self.layout_model.keepouts[idx]
+            if zone.side in {"both", self.side}:
+                p1 = self.grid_to_view(zone.row1, zone.col1); p2 = self.grid_to_view(zone.row2, zone.col2)
+                return QRectF(min(p1.x(), p2.x()), min(p1.y(), p2.y()), abs(p2.x()-p1.x()), abs(p2.y()-p1.y()))
+        return None
+
+    def _draw_group_outlines(self, painter: QPainter) -> None:
+        groups: Dict[str, list[QRectF]] = {}
+        collections = [
+            ("component", self.layout_model.components),
+            ("wire", self.layout_model.wires),
+            ("via", self.layout_model.vias),
+            ("annotation", self.layout_model.annotations),
+            ("keepout", self.layout_model.keepouts),
+        ]
+        for kind, coll in collections:
+            for idx, item in enumerate(coll):
+                group = getattr(item, "group", "")
+                if not group or group in self.hidden_groups:
+                    continue
+                rect = self._rect_for_selection_like(kind, idx)
+                if rect is not None:
+                    groups.setdefault(group, []).append(rect)
+        for group, rects in groups.items():
+            if not rects:
+                continue
+            rect = QRectF(rects[0])
+            for other in rects[1:]:
+                rect = rect.united(other)
+            rect = rect.adjusted(-14, -14, 14, 14)
+            color = self._group_outline_color(group)
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 20))
+            painter.setPen(QPen(color, 1.6, Qt.PenStyle.DashLine))
+            painter.drawRoundedRect(rect, 14, 14)
+            painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setPen(color)
+            painter.drawText(rect.adjusted(8, 2, -8, -2), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, group)
 
     def _draw_temp_objects(self, painter: QPainter) -> None:
         if self.temp_wire:
@@ -428,7 +621,7 @@ class BoardView(QWidget):
         if self.route_suggestion_active and self.route_suggestion_points:
             start = self.route_suggestion_points[0]
             end = self.hover_grid or start
-            route = simple_dogleg_route(start, end)
+            route = self._suggest_route(start, end)
             pts = [self.grid_to_view(r, c) for r, c in route]
             painter.setPen(QPen(self._color(self.current_wire_color, 0.55), max(2.5, 4 * self.zoom), Qt.PenStyle.DashLine))
             for a, b in zip(pts, pts[1:]):
@@ -489,7 +682,7 @@ class BoardView(QWidget):
             self.dragging_view = True
             self.drag_last_pos = pos
             return
-        grid = self.view_to_grid(pos)
+        grid = self._snap_grid_for_wire(pos) if self.tool == "wire" else self.view_to_grid(pos)
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self.tool != "select" and grid is None:
@@ -568,7 +761,7 @@ class BoardView(QWidget):
             self.pan += delta
             self.drag_last_pos = pos
             self.update(); return
-        grid = self.view_to_grid(pos)
+        grid = self._snap_grid_for_wire(pos) if self.tool == "wire" else self.view_to_grid(pos)
         self.hover_grid = grid
         if grid:
             r, c = grid
@@ -619,6 +812,8 @@ class BoardView(QWidget):
         # topmost order: annotations/vias/components/wires/keepouts
         for i in range(len(self.layout_model.annotations)-1, -1, -1):
             note = self.layout_model.annotations[i]
+            if self._is_item_hidden_by_group(note):
+                continue
             if note.side != self.side:
                 continue
             p = self.grid_to_view(note.row, note.col)
@@ -627,17 +822,23 @@ class BoardView(QWidget):
                 return ("annotation", i)
         for i in range(len(self.layout_model.vias)-1, -1, -1):
             via = self.layout_model.vias[i]
+            if self._is_item_hidden_by_group(via):
+                continue
             p = self.grid_to_view(via.row, via.col)
             if math.hypot(pos.x()-p.x(), pos.y()-p.y()) <= max(8, 9*self.zoom):
                 return ("via", i)
         for i in range(len(self.layout_model.components)-1, -1, -1):
             comp = self.layout_model.components[i]
+            if self._is_item_hidden_by_group(comp):
+                continue
             if comp.side != self.side:
                 continue
             if self._component_rect(comp).adjusted(-4,-4,4,4).contains(pos):
                 return ("component", i)
         for i in range(len(self.layout_model.wires)-1, -1, -1):
             wire = self.layout_model.wires[i]
+            if self._is_item_hidden_by_group(wire):
+                continue
             if wire.side != self.side or wire.color in self.hidden_wire_colors:
                 continue
             pts = [self.grid_to_view(r, c) for r, c in wire.points]
@@ -646,6 +847,8 @@ class BoardView(QWidget):
                     return ("wire", i)
         for i in range(len(self.layout_model.keepouts)-1, -1, -1):
             zone = self.layout_model.keepouts[i]
+            if self._is_item_hidden_by_group(zone):
+                continue
             if zone.side not in {"both", self.side}:
                 continue
             p1 = self.grid_to_view(zone.row1, zone.col1); p2 = self.grid_to_view(zone.row2, zone.col2)
@@ -664,7 +867,7 @@ class BoardView(QWidget):
         if start == grid:
             self.statusMessage.emit("Choose a different destination hole for the suggested route.")
             return
-        route = simple_dogleg_route(start, grid)
+        route = self._suggest_route(start, grid)
         self.beforeLayoutChange.emit("Suggest route")
         self.layout_model.wires.append(Wire("", route, self.current_wire_color, side=self.side))
         self.selected = {("wire", len(self.layout_model.wires)-1)}

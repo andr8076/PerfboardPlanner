@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize, QPointF
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen, QShortcut, QBrush, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -57,7 +57,7 @@ from .style import APP_STYLESHEET
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v32")
+        self.setWindowTitle("Perfboard Planner v33")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self.count_pin_connections_both_sides = True
         self._building_inspector = False
         self._warnings: list[LayoutWarning] = []
+        self.muted_warning_signatures: set[str] = set()
         self._build_ui()
         self._wire_events()
         self._refresh_all()
@@ -117,6 +118,12 @@ class MainWindow(QMainWindow):
         footer_layout.addWidget(self.front_side_button); footer_layout.addWidget(self.back_side_button)
 
         footer_layout.addStretch(1)
+        self.footer_route_button = QToolButton()
+        self.footer_route_button.setText("Suggest route")
+        self.footer_route_button.setToolTip("Click, then choose start and destination holes on the board")
+        self.footer_route_button.setVisible(False)
+        footer_layout.addWidget(self.footer_route_button)
+        footer_layout.addStretch(1)
         self.zoom_out_button = QToolButton(); self.zoom_out_button.setText("−"); self.zoom_out_button.setToolTip("Zoom out")
         self.zoom_label = QLabel("100%")
         self.zoom_label.setMinimumWidth(52)
@@ -162,6 +169,31 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
+    def _warning_icon(self, color: str, *, muted: bool = False) -> QIcon:
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        qcolor = QColor(color)
+        painter.setPen(QPen(qcolor.darker(125), 1.8))
+        painter.setBrush(qcolor)
+        if muted:
+            painter.drawEllipse(3, 3, 16, 16)
+            painter.setPen(QPen(QColor(255, 255, 255), 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(7, 7, 15, 15)
+        else:
+            path = QPainterPath()
+            path.moveTo(11, 2.5)
+            path.lineTo(20, 18.5)
+            path.lineTo(2, 18.5)
+            path.closeSubpath()
+            painter.drawPath(path)
+            painter.setPen(QPen(QColor(255, 255, 255), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(11, 7, 11, 12)
+            painter.drawPoint(11, 16)
+        painter.end()
+        return QIcon(pixmap)
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
         toolbar.setIconSize(QSize(20, 20))
@@ -199,7 +231,7 @@ class MainWindow(QMainWindow):
         self.mode_actions["select"].setChecked(True)
         toolbar.addSeparator()
 
-        self.warnings_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning), "Warnings", self)
+        self.warnings_action = QAction(self._warning_icon("#94a3b8"), "Warnings", self)
         self.bom_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "BOM", self)
         toolbar.addAction(self.warnings_action); toolbar.addAction(self.bom_action)
 
@@ -226,11 +258,41 @@ class MainWindow(QMainWindow):
         objects_layout.addLayout(row)
         tabs.addTab(objects_tab, "Objects")
 
+        # Groups / modules
+        groups_tab = QWidget(); groups_layout = QVBoxLayout(groups_tab)
+        groups_layout.addWidget(QLabel("Groups / modules"))
+        self.group_list = QListWidget(); self.group_list.setAlternatingRowColors(True)
+        groups_layout.addWidget(self.group_list, 1)
+        group_row1 = QHBoxLayout()
+        self.select_group_button = QPushButton("Select group")
+        self.hide_group_button = QPushButton("Hide / show")
+        group_row1.addWidget(self.select_group_button); group_row1.addWidget(self.hide_group_button)
+        groups_layout.addLayout(group_row1)
+        group_row2 = QHBoxLayout()
+        self.lock_group_button = QPushButton("Lock / unlock")
+        self.rename_group_button = QPushButton("Rename")
+        group_row2.addWidget(self.lock_group_button); group_row2.addWidget(self.rename_group_button)
+        groups_layout.addLayout(group_row2)
+        self.assign_group_button = QPushButton("Assign selected to this group")
+        self.clear_group_button = QPushButton("Clear group from selected")
+        groups_layout.addWidget(self.assign_group_button)
+        groups_layout.addWidget(self.clear_group_button)
+        groups_layout.addWidget(QLabel("Tip: groups are modules. Select a group to move/delete/lock it together, or hide completed sections."))
+        tabs.addTab(groups_tab, "Groups")
+
         # Warnings
         warnings_tab = QWidget(); warnings_layout = QVBoxLayout(warnings_tab)
         self.warning_summary_label = QLabel("Layout OK")
         self.warning_list = QListWidget(); self.warning_list.setAlternatingRowColors(True)
         warnings_layout.addWidget(self.warning_summary_label); warnings_layout.addWidget(self.warning_list)
+        warning_buttons = QHBoxLayout()
+        self.mute_warning_button = QPushButton("Mute selected")
+        self.mute_all_warnings_button = QPushButton("Mute current")
+        self.clear_muted_warnings_button = QPushButton("Clear muted")
+        warning_buttons.addWidget(self.mute_warning_button)
+        warning_buttons.addWidget(self.mute_all_warnings_button)
+        warning_buttons.addWidget(self.clear_muted_warnings_button)
+        warnings_layout.addLayout(warning_buttons)
         tabs.addTab(warnings_tab, "Warnings")
 
         # Library
@@ -265,7 +327,7 @@ class MainWindow(QMainWindow):
         self.mode_group.triggered.connect(lambda action: self.set_tool(action.data()))
         self.front_side_action.triggered.connect(lambda: self.set_side("front"))
         self.back_side_action.triggered.connect(lambda: self.set_side("back"))
-        self.warnings_action.triggered.connect(lambda: self.left_tabs.setCurrentIndex(1))
+        self.warnings_action.triggered.connect(lambda: self.left_tabs.setCurrentIndex(2))
         self.bom_action.triggered.connect(self.show_bom_dialog)
         self.board.beforeLayoutChange.connect(self.push_undo)
         self.board.layoutChanged.connect(self._on_layout_changed)
@@ -279,8 +341,19 @@ class MainWindow(QMainWindow):
         self.lock_button.clicked.connect(self.toggle_lock_selected)
         self.object_tree.itemClicked.connect(self.select_from_object_tree)
         self.warning_list.itemClicked.connect(self.focus_warning_item)
+        self.mute_warning_button.clicked.connect(self.mute_selected_warning)
+        self.mute_all_warnings_button.clicked.connect(self.mute_all_current_warnings)
+        self.clear_muted_warnings_button.clicked.connect(self.clear_muted_warnings)
         self.show_all_colors_btn.clicked.connect(self.show_all_wire_colors)
+        self.footer_route_button.clicked.connect(self.start_route_suggestion)
         self.library_list.itemDoubleClicked.connect(self.apply_library_preset)
+        self.group_list.itemDoubleClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
+        self.select_group_button.clicked.connect(lambda: self.select_group(self.current_group_name()))
+        self.hide_group_button.clicked.connect(lambda: self.toggle_group_hidden(self.current_group_name()))
+        self.lock_group_button.clicked.connect(lambda: self.toggle_group_locked(self.current_group_name()))
+        self.rename_group_button.clicked.connect(lambda: self.rename_group(self.current_group_name()))
+        self.assign_group_button.clicked.connect(lambda: self.assign_selected_to_group(self.current_group_name()))
+        self.clear_group_button.clicked.connect(self.clear_group_from_selected)
         self.zoom_out_button.clicked.connect(lambda: self.board.zoom_out())
         self.zoom_in_button.clicked.connect(lambda: self.board.zoom_in())
         self.zoom_reset_button.clicked.connect(lambda: self.board.reset_zoom())
@@ -297,6 +370,8 @@ class MainWindow(QMainWindow):
         self.board.set_tool(tool)
         if tool in self.mode_actions:
             self.mode_actions[tool].setChecked(True)
+        if hasattr(self, "footer_route_button"):
+            self.footer_route_button.setVisible(tool == "wire")
         self.statusBar().showMessage(f"Mode: {tool}")
         self.populate_inspector()
 
@@ -344,9 +419,12 @@ class MainWindow(QMainWindow):
     def _refresh_all(self) -> None:
         self.board.pin_count_map = pin_connection_counts(self.layout_model, count_both_sides=self.count_pin_connections_both_sides)
         self._warnings = layout_warnings(self.layout_model, max_pin_connections=self.max_pin_connections, count_both_sides=self.count_pin_connections_both_sides)
-        self.board.warning_points = {(w.row, w.col) for w in self._warnings if w.row is not None and w.col is not None}
+        active_warnings = self.active_warnings()
+        self.board.warning_points = {(w.row, w.col) for w in active_warnings if w.row is not None and w.col is not None}
+        self.update_warning_action()
         self.board.update()
         self.populate_objects()
+        self.populate_groups()
         self.populate_warnings()
         self.populate_wire_colors()
         self.populate_bom()
@@ -443,14 +521,214 @@ class MainWindow(QMainWindow):
         self.board.selected = {data}
         self.board.selectionChanged.emit(); self.board.update()
 
+    def _group_items(self, group: str) -> list[Selection]:
+        if not group:
+            return []
+        result: list[Selection] = []
+        for kind, coll in [("component", self.layout_model.components), ("wire", self.layout_model.wires), ("via", self.layout_model.vias), ("annotation", self.layout_model.annotations), ("keepout", self.layout_model.keepouts)]:
+            for idx, item in enumerate(coll):
+                if getattr(item, "group", "") == group:
+                    result.append((kind, idx))
+        return result
+
+    def populate_groups(self) -> None:
+        if not hasattr(self, "group_list"):
+            return
+        current = self.current_group_name()
+        self.group_list.blockSignals(True)
+        self.group_list.clear()
+        groups = sorted({getattr(item, "group", "") for coll in [self.layout_model.components, self.layout_model.wires, self.layout_model.vias, self.layout_model.annotations, self.layout_model.keepouts] for item in coll if getattr(item, "group", "")})
+        if not groups:
+            item = QListWidgetItem("No groups yet")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.group_list.addItem(item)
+        for group in groups:
+            selections = self._group_items(group)
+            hidden = group in self.board.hidden_groups
+            locked_count = 0
+            for kind, idx in selections:
+                coll = self.board._collection(kind)
+                if coll is not None and 0 <= idx < len(coll) and getattr(coll[idx], "locked", False):
+                    locked_count += 1
+            suffix = []
+            if hidden:
+                suffix.append("hidden")
+            if locked_count:
+                suffix.append(f"{locked_count} locked")
+            label = f"{group} · {len(selections)} item{'s' if len(selections) != 1 else ''}" + (" · " + ", ".join(suffix) if suffix else "")
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, group)
+            self.group_list.addItem(item)
+            if group == current:
+                item.setSelected(True)
+                self.group_list.setCurrentItem(item)
+        self.group_list.blockSignals(False)
+
+    def current_group_name(self) -> str:
+        if not hasattr(self, "group_list"):
+            return ""
+        item = self.group_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item and item.data(Qt.ItemDataRole.UserRole) else ""
+
+    def select_group(self, group: str) -> None:
+        if not group:
+            return
+        self.board.selected = set(self._group_items(group))
+        self.board.selectionChanged.emit()
+        self.board.update()
+        self.statusBar().showMessage(f"Selected group: {group}")
+
+    def toggle_group_hidden(self, group: str) -> None:
+        if not group:
+            return
+        if group in self.board.hidden_groups:
+            self.board.hidden_groups.remove(group)
+        else:
+            self.board.hidden_groups.add(group)
+            self.board.selected = {sel for sel in self.board.selected if sel not in self._group_items(group)}
+        self.populate_groups()
+        self.board.selectionChanged.emit()
+        self.board.update()
+
+    def toggle_group_locked(self, group: str) -> None:
+        if not group:
+            return
+        items = self._group_items(group)
+        if not items:
+            return
+        should_lock = any(not getattr(self.board._collection(kind)[idx], "locked", False) for kind, idx in items if self.board._collection(kind) is not None and idx < len(self.board._collection(kind)))
+        def do():
+            for kind, idx in items:
+                coll = self.board._collection(kind)
+                if coll is not None and 0 <= idx < len(coll) and hasattr(coll[idx], "locked"):
+                    setattr(coll[idx], "locked", should_lock)
+        self._apply_change("Toggle group lock", do)
+
+    def rename_group(self, group: str) -> None:
+        if not group:
+            return
+        text, ok = QInputDialog.getText(self, "Rename group", "Group name:", text=group)
+        if not ok or not text.strip():
+            return
+        new_name = text.strip()
+        def do():
+            for kind, idx in self._group_items(group):
+                coll = self.board._collection(kind)
+                if coll is not None and 0 <= idx < len(coll) and hasattr(coll[idx], "group"):
+                    setattr(coll[idx], "group", new_name)
+            if group in self.board.hidden_groups:
+                self.board.hidden_groups.remove(group); self.board.hidden_groups.add(new_name)
+        self._apply_change("Rename group", do)
+
+    def assign_selected_to_group(self, group: str) -> None:
+        if not self.board.selected:
+            return
+        if not group:
+            group, ok = QInputDialog.getText(self, "Assign group", "Group name:")
+            if not ok or not group.strip():
+                return
+            group = group.strip()
+        def do():
+            for kind, idx in self.board.selected:
+                coll = self.board._collection(kind)
+                if coll is not None and 0 <= idx < len(coll) and hasattr(coll[idx], "group"):
+                    setattr(coll[idx], "group", group)
+        self._apply_change("Assign group", do)
+        self.left_tabs.setCurrentIndex(1)
+
+    def clear_group_from_selected(self) -> None:
+        if not self.board.selected:
+            return
+        def do():
+            for kind, idx in self.board.selected:
+                coll = self.board._collection(kind)
+                if coll is not None and 0 <= idx < len(coll) and hasattr(coll[idx], "group"):
+                    setattr(coll[idx], "group", "")
+        self._apply_change("Clear group", do)
+
+    def _warning_signature(self, warning: LayoutWarning) -> str:
+        return "|".join([
+            str(warning.code),
+            str(warning.side),
+            str(warning.row),
+            str(warning.col),
+            str(warning.item_kind),
+            str(warning.item_index),
+            str(warning.message),
+        ])
+
+    def active_warnings(self) -> list[LayoutWarning]:
+        return [w for w in self._warnings if self._warning_signature(w) not in self.muted_warning_signatures]
+
+    def muted_warnings(self) -> list[LayoutWarning]:
+        return [w for w in self._warnings if self._warning_signature(w) in self.muted_warning_signatures]
+
+    def update_warning_action(self) -> None:
+        active_count = len(self.active_warnings())
+        muted_count = len(self.muted_warnings())
+        if active_count:
+            self.warnings_action.setText(f"Warnings ({active_count})")
+            self.warnings_action.setIcon(self._warning_icon("#f59e0b"))
+            self.warnings_action.setToolTip(f"{active_count} active layout warning{'s' if active_count != 1 else ''}. {muted_count} muted.")
+        elif muted_count:
+            self.warnings_action.setText("Warnings muted")
+            self.warnings_action.setIcon(self._warning_icon("#94a3b8", muted=True))
+            self.warnings_action.setToolTip(f"No active warnings. {muted_count} warning{'s' if muted_count != 1 else ''} muted.")
+        else:
+            self.warnings_action.setText("Warnings")
+            self.warnings_action.setIcon(self._warning_icon("#22c55e"))
+            self.warnings_action.setToolTip("No layout warnings.")
+
     def populate_warnings(self) -> None:
         self.warning_list.clear()
-        count = len(self._warnings)
-        self.warning_summary_label.setText("Layout OK" if count == 0 else f"{count} layout warning{'s' if count != 1 else ''}")
-        for warning in self._warnings:
+        active = self.active_warnings()
+        muted = self.muted_warnings()
+        active_count = len(active)
+        if active_count:
+            text = f"{active_count} active layout warning{'s' if active_count != 1 else ''}"
+            if muted:
+                text += f" · {len(muted)} muted"
+        elif muted:
+            text = f"Layout OK · {len(muted)} muted warning{'s' if len(muted) != 1 else ''}"
+        else:
+            text = "Layout OK"
+        self.warning_summary_label.setText(text)
+        for warning in active:
             item = QListWidgetItem(f"{warning.code}: {warning.message}")
             item.setData(Qt.ItemDataRole.UserRole, warning)
             self.warning_list.addItem(item)
+        if muted:
+            header = QListWidgetItem(f"— Muted ({len(muted)})")
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            header.setForeground(QBrush(QColor("#64748b")))
+            self.warning_list.addItem(header)
+            for warning in muted:
+                item = QListWidgetItem(f"muted · {warning.code}: {warning.message}")
+                item.setData(Qt.ItemDataRole.UserRole, warning)
+                item.setForeground(QBrush(QColor("#94a3b8")))
+                self.warning_list.addItem(item)
+
+    def mute_selected_warning(self) -> None:
+        item = self.warning_list.currentItem()
+        if not item:
+            return
+        warning = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(warning, LayoutWarning):
+            return
+        self.muted_warning_signatures.add(self._warning_signature(warning))
+        self._refresh_all()
+        self.statusBar().showMessage("Warning muted.")
+
+    def mute_all_current_warnings(self) -> None:
+        for warning in self.active_warnings():
+            self.muted_warning_signatures.add(self._warning_signature(warning))
+        self._refresh_all()
+        self.statusBar().showMessage("Current warnings muted.")
+
+    def clear_muted_warnings(self) -> None:
+        self.muted_warning_signatures.clear()
+        self._refresh_all()
+        self.statusBar().showMessage("Muted warnings cleared.")
 
     def focus_warning_item(self, item: QListWidgetItem) -> None:
         warning = item.data(Qt.ItemDataRole.UserRole)
@@ -677,7 +955,13 @@ class MainWindow(QMainWindow):
         both = QCheckBox("Count both sides for pin limits"); both.setChecked(self.count_pin_connections_both_sides); both.toggled.connect(lambda v: self._set_pin_count_both_sides(v))
         view.addRow("Max pin connections", max_spin); view.addRow(both)
 
-        _, newpart = self._card("New component template")
+        if self.board.tool == "component":
+            self._inspect_new_component_template()
+        elif self.board.tool == "wire":
+            self._inspect_new_wire_tool()
+
+    def _inspect_new_component_template(self) -> None:
+        _, newpart = self._card("Part mode · new component")
         t = self.board.new_component_template
         newpart.addRow("Name", self._line(t.name, lambda v: setattr(t, "name", v)))
         newpart.addRow("Value", self._line(t.value, lambda v: setattr(t, "value", v)))
@@ -691,12 +975,12 @@ class MainWindow(QMainWindow):
         pins_btn.clicked.connect(lambda: self.edit_component_pins(t, is_template=True))
         newpart.addRow(pins_btn)
 
-        _, wire = self._card("New wire")
+    def _inspect_new_wire_tool(self) -> None:
+        _, wire = self._card("Wire mode")
         wire.addRow("Color", self._wire_color_selector(self.board.current_wire_color, lambda v: setattr(self.board, "current_wire_color", v)))
-        route_btn = QPushButton("Suggest route: click two board points")
-        route_btn.setToolTip("Enter route-suggestion mode, then click a start hole and a destination hole on the board.")
-        route_btn.clicked.connect(self.start_route_suggestion)
-        wire.addRow(route_btn)
+        hint = QLabel("Use the bottom-bar Suggest route button, then click two board holes or pins.")
+        hint.setObjectName("MutedLabel")
+        wire.addRow(hint)
 
     def _set_pin_limit(self, value: int) -> None:
         self.max_pin_connections = value; self._refresh_all()
