@@ -1,4 +1,4 @@
-"""Perfboard Planner v34.
+"""Perfboard Planner v36.
 
 Qt workflow cleanup: context-aware routing, contextual tool settings, useful groups/modules, and muted warnings.
 """

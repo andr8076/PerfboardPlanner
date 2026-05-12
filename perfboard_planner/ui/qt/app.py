@@ -75,7 +75,7 @@ class CompactTabWidget(QTabWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v34")
+        self.setWindowTitle("Perfboard Planner v36")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
@@ -386,7 +386,9 @@ class MainWindow(QMainWindow):
         self.show_all_colors_btn.clicked.connect(self.show_all_wire_colors)
         self.footer_route_button.clicked.connect(self.start_route_suggestion)
         self.library_list.itemDoubleClicked.connect(self.apply_library_preset)
+        self.group_list.itemClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
         self.group_list.itemDoubleClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
+        self.left_tabs.currentChanged.connect(self._left_tab_changed)
         self.select_group_button.clicked.connect(lambda: self.select_group(self.current_group_name()))
         self.hide_group_button.clicked.connect(lambda: self.toggle_group_hidden(self.current_group_name()))
         self.lock_group_button.clicked.connect(lambda: self.toggle_group_locked(self.current_group_name()))
@@ -401,6 +403,17 @@ class MainWindow(QMainWindow):
         self.escape_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self.escape_shortcut.activated.connect(lambda: self.set_tool("select"))
 
+
+    def _left_tab_changed(self, index: int) -> None:
+        # Group outlines are intentionally contextual: they appear only while
+        # the Groups tab is being used. This keeps the board clean during
+        # normal editing.
+        if not hasattr(self, "left_tabs"):
+            return
+        if index != 1:
+            self.board.highlighted_groups.clear()
+            self.board.update()
+
     def update_zoom_label(self, zoom: float) -> None:
         if hasattr(self, "zoom_label"):
             self.zoom_label.setText(f"{int(round(zoom * 100))}%")
@@ -411,6 +424,7 @@ class MainWindow(QMainWindow):
             self.mode_actions[tool].setChecked(True)
         if hasattr(self, "footer_route_button"):
             self.footer_route_button.setVisible(tool == "wire")
+            self.update_route_button()
         self.statusBar().showMessage(f"Mode: {tool}")
         self.populate_inspector()
 
@@ -466,6 +480,7 @@ class MainWindow(QMainWindow):
         self.populate_groups()
         self.populate_warnings()
         self.populate_wire_colors()
+        self.update_route_button()
         self.populate_bom()
         self.populate_inspector()
         self._update_undo_actions()
@@ -602,6 +617,9 @@ class MainWindow(QMainWindow):
                 item.setSelected(True)
                 self.group_list.setCurrentItem(item)
         self.group_list.blockSignals(False)
+        if self.board.highlighted_groups and not any(g in self.board.highlighted_groups for g in groups):
+            self.board.highlighted_groups.clear()
+            self.board.update()
 
     def current_group_name(self) -> str:
         if not hasattr(self, "group_list"):
@@ -613,6 +631,7 @@ class MainWindow(QMainWindow):
         if not group:
             return
         self.board.selected = set(self._group_items(group))
+        self.board.highlighted_groups = {group}
         self.board.selectionChanged.emit()
         self.board.update()
         self.statusBar().showMessage(f"Selected group: {group}")
@@ -625,6 +644,7 @@ class MainWindow(QMainWindow):
         else:
             self.board.hidden_groups.add(group)
             self.board.selected = {sel for sel in self.board.selected if sel not in self._group_items(group)}
+            self.board.highlighted_groups.discard(group)
         self.populate_groups()
         self.board.selectionChanged.emit()
         self.board.update()
@@ -842,6 +862,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported {path}")
 
     def clear_inspector(self) -> None:
+        if hasattr(self, "board"):
+            self.board.inspector_focus_grid = None
+            self.board.update()
         while self.inspector_layout.count():
             item = self.inspector_layout.takeAt(0)
             if item.widget():
@@ -916,6 +939,20 @@ class MainWindow(QMainWindow):
                 colors.append(color)
         return sorted(colors, key=str.lower)
 
+    def _set_current_wire_color(self, color: str) -> None:
+        self.board.current_wire_color = color
+        self.update_route_button()
+        self.board.update()
+
+    def update_route_button(self) -> None:
+        if not hasattr(self, "footer_route_button"):
+            return
+        color = QColor(getattr(self.board, "current_wire_color", "#d00000") or "#d00000")
+        fg = "#ffffff" if color.lightness() < 120 else "#111827"
+        active = bool(getattr(self.board, "route_suggestion_active", False))
+        self.footer_route_button.setText("Cancel suggested route" if active else "Suggest route: click two points")
+        self.footer_route_button.setStyleSheet(f"QToolButton {{background:{color.name()}; color:{fg}; border-radius:10px; padding:7px 14px; font-weight:800; border:1px solid rgba(15,23,42,0.20);}} QToolButton:hover {{border:2px solid #0f172a;}}")
+
     def _wire_color_selector(self, value: str, changed) -> QWidget:
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -936,6 +973,7 @@ class MainWindow(QMainWindow):
             apply_style(color_text)
             changed(color_text)
             self.populate_wire_colors()
+            self.update_route_button()
             self.board.update()
 
         apply_style(value)
@@ -974,30 +1012,55 @@ class MainWindow(QMainWindow):
         self._refresh_all()
 
     def _inspect_project_and_tools(self) -> None:
-        _, form = self._card("Project")
-        p = self.layout_model.project
-        form.addRow("Title", self._line(p.title, lambda v: self._apply_change("Edit title", lambda: setattr(p, "title", v))))
-        form.addRow("Author", self._line(p.author, lambda v: self._apply_change("Edit author", lambda: setattr(p, "author", v))))
-        form.addRow("Revision", self._line(p.revision, lambda v: self._apply_change("Edit revision", lambda: setattr(p, "revision", v))))
-        notes = QTextEdit(p.notes); notes.setMinimumHeight(70); notes.textChanged.connect(lambda: setattr(p, "notes", notes.toPlainText()))
-        form.addRow("Notes", notes)
+        # The inspector is contextual. Project settings are only shown in the
+        # neutral Select mode with nothing selected. Tool-specific setup appears
+        # only while that tool is active.
+        if self.board.tool == "select":
+            _, form = self._card("Project")
+            p = self.layout_model.project
+            form.addRow("Title", self._line(p.title, lambda v: self._apply_change("Edit title", lambda: setattr(p, "title", v))))
+            form.addRow("Author", self._line(p.author, lambda v: self._apply_change("Edit author", lambda: setattr(p, "author", v))))
+            form.addRow("Revision", self._line(p.revision, lambda v: self._apply_change("Edit revision", lambda: setattr(p, "revision", v))))
+            notes = QTextEdit(p.notes); notes.setMinimumHeight(70); notes.textChanged.connect(lambda: setattr(p, "notes", notes.toPlainText()))
+            form.addRow("Notes", notes)
 
-        _, view = self._card("View")
-        cb_names = QCheckBox("Show component names"); cb_names.setChecked(self.board.show_component_names); cb_names.toggled.connect(lambda v: setattr(self.board, "show_component_names", v) or self.board.update())
-        cb_pins = QCheckBox("Show pin names"); cb_pins.setChecked(self.board.show_pin_names); cb_pins.toggled.connect(lambda v: setattr(self.board, "show_pin_names", v) or self.board.update())
-        cb_counts = QCheckBox("Show pin counts"); cb_counts.setChecked(self.board.show_pin_counts); cb_counts.toggled.connect(lambda v: setattr(self.board, "show_pin_counts", v) or self.board.update())
-        cb_other_parts = QCheckBox("Ghost opposite-side parts"); cb_other_parts.setChecked(self.board.show_other_parts); cb_other_parts.toggled.connect(lambda v: setattr(self.board, "show_other_parts", v) or self.board.update())
-        cb_other_pins = QCheckBox("Ghost opposite-side pins"); cb_other_pins.setChecked(self.board.show_other_pins); cb_other_pins.toggled.connect(lambda v: setattr(self.board, "show_other_pins", v) or self.board.update())
-        cb_other_wires = QCheckBox("Ghost opposite-side wires"); cb_other_wires.setChecked(self.board.show_other_wires); cb_other_wires.toggled.connect(lambda v: setattr(self.board, "show_other_wires", v) or self.board.update())
-        for cb in [cb_names, cb_pins, cb_counts, cb_other_parts, cb_other_pins, cb_other_wires]: view.addRow(cb)
-        max_spin = self._spin(self.max_pin_connections, 0, 20, lambda v: self._set_pin_limit(v))
-        both = QCheckBox("Count both sides for pin limits"); both.setChecked(self.count_pin_connections_both_sides); both.toggled.connect(lambda v: self._set_pin_count_both_sides(v))
-        view.addRow("Max pin connections", max_spin); view.addRow(both)
+            _, view = self._card("View")
+            cb_names = QCheckBox("Show component names"); cb_names.setChecked(self.board.show_component_names); cb_names.toggled.connect(lambda v: setattr(self.board, "show_component_names", v) or self.board.update())
+            cb_pins = QCheckBox("Show pin names"); cb_pins.setChecked(self.board.show_pin_names); cb_pins.toggled.connect(lambda v: setattr(self.board, "show_pin_names", v) or self.board.update())
+            cb_counts = QCheckBox("Show pin counts"); cb_counts.setChecked(self.board.show_pin_counts); cb_counts.toggled.connect(lambda v: setattr(self.board, "show_pin_counts", v) or self.board.update())
+            cb_other_parts = QCheckBox("Ghost opposite-side parts"); cb_other_parts.setChecked(self.board.show_other_parts); cb_other_parts.toggled.connect(lambda v: setattr(self.board, "show_other_parts", v) or self.board.update())
+            cb_other_pins = QCheckBox("Ghost opposite-side pins"); cb_other_pins.setChecked(self.board.show_other_pins); cb_other_pins.toggled.connect(lambda v: setattr(self.board, "show_other_pins", v) or self.board.update())
+            cb_other_wires = QCheckBox("Ghost opposite-side wires"); cb_other_wires.setChecked(self.board.show_other_wires); cb_other_wires.toggled.connect(lambda v: setattr(self.board, "show_other_wires", v) or self.board.update())
+            cb_keepouts = QCheckBox("Show current-side keepouts"); cb_keepouts.setChecked(self.board.show_current_keepouts); cb_keepouts.toggled.connect(lambda v: setattr(self.board, "show_current_keepouts", v) or self.board.update())
+            cb_other_keepouts = QCheckBox("Ghost opposite-side keepouts"); cb_other_keepouts.setChecked(self.board.show_other_keepouts); cb_other_keepouts.toggled.connect(lambda v: setattr(self.board, "show_other_keepouts", v) or self.board.update())
+            cb_cross = QCheckBox("Mouse row/column crosshair"); cb_cross.setChecked(self.board.show_mouse_cross); cb_cross.toggled.connect(lambda v: setattr(self.board, "show_mouse_cross", v) or self.board.update())
+            for cb in [cb_names, cb_pins, cb_counts, cb_other_parts, cb_other_pins, cb_other_wires, cb_keepouts, cb_other_keepouts, cb_cross]:
+                view.addRow(cb)
+
+            label_style = self._combo(self.board.grid_label_style, ["numbers", "letters", "both"], lambda v: setattr(self.board, "grid_label_style", v) or self.board.update())
+            view.addRow("Row/column label style", label_style)
+            cb_fr = QCheckBox("Front row labels"); cb_fr.setChecked(self.board.show_front_row_labels); cb_fr.toggled.connect(lambda v: setattr(self.board, "show_front_row_labels", v) or self.board.update())
+            cb_fc = QCheckBox("Front column labels"); cb_fc.setChecked(self.board.show_front_col_labels); cb_fc.toggled.connect(lambda v: setattr(self.board, "show_front_col_labels", v) or self.board.update())
+            cb_br = QCheckBox("Back row labels"); cb_br.setChecked(self.board.show_back_row_labels); cb_br.toggled.connect(lambda v: setattr(self.board, "show_back_row_labels", v) or self.board.update())
+            cb_bc = QCheckBox("Back column labels"); cb_bc.setChecked(self.board.show_back_col_labels); cb_bc.toggled.connect(lambda v: setattr(self.board, "show_back_col_labels", v) or self.board.update())
+            for cb in [cb_fr, cb_fc, cb_br, cb_bc]:
+                view.addRow(cb)
+            max_spin = self._spin(self.max_pin_connections, 0, 20, lambda v: self._set_pin_limit(v))
+            both = QCheckBox("Count both sides for pin limits"); both.setChecked(self.count_pin_connections_both_sides); both.toggled.connect(lambda v: self._set_pin_count_both_sides(v))
+            view.addRow("Max pin connections", max_spin); view.addRow(both)
+            return
 
         if self.board.tool == "component":
             self._inspect_new_component_template()
         elif self.board.tool == "wire":
             self._inspect_new_wire_tool()
+        elif self.board.tool == "keepout":
+            self._inspect_new_keepout_tool()
+        else:
+            _, form = self._card(f"{self.board.tool.title()} mode")
+            hint = QLabel("Click the board to place items in this mode. Press Esc to return to Select.")
+            hint.setObjectName("MutedLabel")
+            form.addRow(hint)
 
     def _inspect_new_component_template(self) -> None:
         _, newpart = self._card("Part mode · new component")
@@ -1016,10 +1079,19 @@ class MainWindow(QMainWindow):
 
     def _inspect_new_wire_tool(self) -> None:
         _, wire = self._card("Wire mode")
-        wire.addRow("Color", self._wire_color_selector(self.board.current_wire_color, lambda v: setattr(self.board, "current_wire_color", v)))
+        wire.addRow("Color", self._wire_color_selector(self.board.current_wire_color, self._set_current_wire_color))
         hint = QLabel("Use the bottom-bar Suggest route button, then click two board holes or pins.")
         hint.setObjectName("MutedLabel")
         wire.addRow(hint)
+
+
+    def _inspect_new_keepout_tool(self) -> None:
+        _, keepout = self._card("Keepout mode")
+        keepout.addRow("Color", self._color_button(self.board.current_keepout_color, lambda v: setattr(self.board, "current_keepout_color", v)))
+        hint = QLabel("Click two opposite corners to create a mechanical no-go area. Visibility is controlled from Select mode → View.")
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        keepout.addRow(hint)
 
     def _set_pin_limit(self, value: int) -> None:
         self.max_pin_connections = value; self._refresh_all()
@@ -1061,6 +1133,22 @@ class MainWindow(QMainWindow):
         form.addRow(locked)
         form.addRow("Group", self._line(wire.group, lambda v: self._apply_change("Set group", lambda: setattr(wire, "group", v))))
         points = QTextEdit("\n".join(f"{r+1};{c+1}" for r,c in wire.points)); points.setMinimumHeight(90)
+        def update_point_focus():
+            line = points.textCursor().block().text().strip()
+            parsed = None
+            try:
+                parts = line.replace(",", ";").split(";")
+                if len(parts) >= 2:
+                    rr = max(0, int(parts[0]) - 1)
+                    cc = max(0, int(parts[1]) - 1)
+                    if 0 <= rr < self.layout_model.rows and 0 <= cc < self.layout_model.cols:
+                        parsed = (rr, cc)
+            except Exception:
+                parsed = None
+            self.board.inspector_focus_grid = parsed
+            self.board.update()
+        points.cursorPositionChanged.connect(update_point_focus)
+        points.textChanged.connect(update_point_focus)
         apply_btn = QPushButton("Apply points")
         def apply_points():
             new = []
@@ -1185,7 +1273,15 @@ class MainWindow(QMainWindow):
 
     def start_route_suggestion(self) -> None:
         self.set_tool("wire")
+        if self.board.route_suggestion_active:
+            self.board.route_suggestion_active = False
+            self.board.route_suggestion_points.clear()
+            self.board.update()
+            self.update_route_button()
+            self.statusBar().showMessage("Suggested route cancelled.")
+            return
         self.board.start_route_suggestion()
+        self.update_route_button()
         self.statusBar().showMessage("Suggest route: click the start hole, then the destination hole.")
 
     def suggest_route_dialog(self) -> None:
