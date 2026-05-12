@@ -1,6 +1,6 @@
-# Perfboard Planner v37
+# Perfboard Planner v38
 
-v37 continues the Qt UI cleanup and focuses on canvas clarity, routing behavior, and view aids.
+v38 adds bulk wire routing tools on top of the Qt workflow. You can optimize the current side, the whole board, or allow via-based cross-side routing.
 
 ## Run
 
@@ -15,6 +15,15 @@ The older Tkinter fallback is still available:
 python run_tk.py
 ```
 
+
+
+## v38 changes
+
+- Added **Suggest all** in Wire mode.
+- Optimize existing wires on the current side while keeping endpoints.
+- Optimize the whole board across front/back wires.
+- Optional whole-board routing with via transitions to the opposite side.
+- Router still treats component bodies and keepouts as hard no-go areas.
 
 ## v37 hotfix
 

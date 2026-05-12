@@ -1,6 +1,6 @@
-"""Perfboard Planner v37.
+"""Perfboard Planner v38.
 
-Qt workflow cleanup: context-aware routing, contextual tool settings, useful groups/modules, and muted warnings.
+Qt routing update: suggest all wires, optimize current side or whole board, and optional via-based cross-side routing.
 """
 
-__version__ = "37.0"
+__version__ = "38.0"

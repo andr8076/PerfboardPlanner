@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -75,7 +76,7 @@ class CompactTabWidget(QTabWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v37")
+        self.setWindowTitle("Perfboard Planner v38")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
@@ -141,6 +142,22 @@ class MainWindow(QMainWindow):
         self.footer_route_button.setToolTip("Click, then choose start and destination holes on the board")
         self.footer_route_button.setVisible(False)
         footer_layout.addWidget(self.footer_route_button)
+
+        self.footer_optimize_button = QToolButton()
+        self.footer_optimize_button.setText("Suggest all")
+        self.footer_optimize_button.setToolTip("Reroute existing wires while keeping their endpoints")
+        self.footer_optimize_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.footer_optimize_button.setVisible(False)
+        optimize_menu = QMenu(self.footer_optimize_button)
+        self.optimize_current_side_action = QAction("Optimize current side", self)
+        self.optimize_whole_board_action = QAction("Optimize whole board", self)
+        self.optimize_with_vias_action = QAction("Optimize whole board + allow vias", self)
+        optimize_menu.addAction(self.optimize_current_side_action)
+        optimize_menu.addAction(self.optimize_whole_board_action)
+        optimize_menu.addSeparator()
+        optimize_menu.addAction(self.optimize_with_vias_action)
+        self.footer_optimize_button.setMenu(optimize_menu)
+        footer_layout.addWidget(self.footer_optimize_button)
         footer_layout.addStretch(1)
         self.zoom_out_button = QToolButton(); self.zoom_out_button.setText("−"); self.zoom_out_button.setToolTip("Zoom out")
         self.zoom_label = QLabel("100%")
@@ -385,6 +402,9 @@ class MainWindow(QMainWindow):
         self.clear_muted_warnings_button.clicked.connect(self.clear_muted_warnings)
         self.show_all_colors_btn.clicked.connect(self.show_all_wire_colors)
         self.footer_route_button.clicked.connect(self.start_route_suggestion)
+        self.optimize_current_side_action.triggered.connect(lambda: self.optimize_wire_routes("current_side", False))
+        self.optimize_whole_board_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", False))
+        self.optimize_with_vias_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", True))
         self.library_list.itemDoubleClicked.connect(self.apply_library_preset)
         self.group_list.itemClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
         self.group_list.itemDoubleClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
@@ -424,6 +444,7 @@ class MainWindow(QMainWindow):
             self.mode_actions[tool].setChecked(True)
         if hasattr(self, "footer_route_button"):
             self.footer_route_button.setVisible(tool == "wire")
+            self.footer_optimize_button.setVisible(tool == "wire")
             self.update_route_button()
         self.statusBar().showMessage(f"Mode: {tool}")
         self.populate_inspector()
@@ -952,6 +973,8 @@ class MainWindow(QMainWindow):
         active = bool(getattr(self.board, "route_suggestion_active", False))
         self.footer_route_button.setText("Cancel suggested route" if active else "Suggest route: click two points")
         self.footer_route_button.setStyleSheet(f"QToolButton {{background:{color.name()}; color:{fg}; border-radius:10px; padding:7px 14px; font-weight:800; border:1px solid rgba(15,23,42,0.20);}} QToolButton:hover {{border:2px solid #0f172a;}}")
+        if hasattr(self, "footer_optimize_button"):
+            self.footer_optimize_button.setStyleSheet("QToolButton {background:#0f172a; color:#ffffff; border-radius:10px; padding:7px 14px; font-weight:800;} QToolButton:hover {background:#1e293b;}")
 
     def _wire_color_selector(self, value: str, changed) -> QWidget:
         row = QWidget()
@@ -1270,6 +1293,20 @@ class MainWindow(QMainWindow):
             t.width = 3; t.height = 1; t.pins = [ComponentPin("P1", 0, 0), ComponentPin("P2", 0, 2)]
         self.set_tool("component"); self.populate_inspector()
         self.statusBar().showMessage(f"Loaded template: {text}")
+
+    def optimize_wire_routes(self, scope: str, allow_cross_side: bool) -> None:
+        routed, failed, vias = self.board.optimize_wire_routes(scope=scope, allow_cross_side=allow_cross_side)
+        self._refresh_all()
+        scope_text = "current side" if scope == "current_side" else "whole board"
+        if routed == 0 and failed == 0:
+            self.statusBar().showMessage(f"No unlocked wires to optimize on the {scope_text}.")
+            return
+        parts = [f"optimized {routed} wire{'s' if routed != 1 else ''}"]
+        if vias:
+            parts.append(f"added {vias} via{'s' if vias != 1 else ''}")
+        if failed:
+            parts.append(f"{failed} could not be safely routed")
+        self.statusBar().showMessage("Suggest all: " + ", ".join(parts) + ".")
 
     def start_route_suggestion(self) -> None:
         self.set_tool("wire")
