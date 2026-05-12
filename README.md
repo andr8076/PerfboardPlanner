@@ -1,6 +1,6 @@
-# Perfboard Planner v36
+# Perfboard Planner v37
 
-v36 continues the Qt UI cleanup and focuses on canvas clarity, routing behavior, and view aids.
+v37 continues the Qt UI cleanup and focuses on canvas clarity, routing behavior, and view aids.
 
 ## Run
 
@@ -15,7 +15,13 @@ The older Tkinter fallback is still available:
 python run_tk.py
 ```
 
-## v36 changes
+
+## v37 hotfix
+
+- Fixed a route-suggestion bug that could freeze the app and grow RAM usage.
+- The route finder now stores direction-aware parent states and has a hard search cap.
+
+## v37 changes
 
 - Group outlines are only shown when a group is selected from the Groups tab, keeping the canvas uncluttered during normal editing.
 - Selecting a group from the Groups tab selects the items in that group.

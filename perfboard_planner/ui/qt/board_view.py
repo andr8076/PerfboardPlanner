@@ -439,12 +439,17 @@ class BoardView(QWidget):
         return result
 
     def _suggest_route(self, start: GridPoint, end: GridPoint) -> list[GridPoint]:
-        """Find a safe orthogonal route that never crosses component bodies.
+        """Find a safe orthogonal route without runaway memory use.
 
-        Existing wires are treated as expensive, not blocked, so the router will
-        avoid crossing/overlapping them unless that is the only practical route.
         Component bodies and keepout cells are hard blocks, except for the two
-        explicit endpoints.
+        explicit endpoints. Existing wire cells are not blocked, but they are
+        expensive, so the route avoids them when a clean alternative exists.
+
+        The earlier v36 version stored route parents only by grid point while
+        searching with direction-specific states. That could create parent
+        cycles during reconstruction, which could freeze the program and grow
+        RAM. This version stores parents by full search state and has a hard
+        expansion cap.
         """
         if start == end:
             return [start]
@@ -452,51 +457,75 @@ class BoardView(QWidget):
         cols = self.layout_model.cols
         if not (board_contains(start[0], start[1], rows, cols) and board_contains(end[0], end[1], rows, cols)):
             return []
+
         blocked = self._route_blocked_cells(start, end)
         wire_cells = self._route_wire_cells()
-        frontier: list[tuple[int, int, GridPoint, Optional[tuple[int, int]]]] = []
-        heapq.heappush(frontier, (0, 0, start, None))
-        came_from: dict[GridPoint, Optional[GridPoint]] = {start: None}
-        best_cost: dict[tuple[GridPoint, Optional[tuple[int, int]]], int] = {(start, None): 0}
-        counter = 0
         directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        found: Optional[tuple[GridPoint, Optional[tuple[int, int]]]] = None
-        best_end_cost = 10**12
-        while frontier:
-            cost, _, current, prev_dir = heapq.heappop(frontier)
-            if current == end:
-                found = (current, prev_dir)
-                best_end_cost = cost
-                break
-            if cost > best_end_cost:
+
+        # State is (grid point, incoming direction). Keeping the direction in
+        # the state lets us penalize bends without corrupting the parent chain.
+        State = tuple[GridPoint, Optional[tuple[int, int]]]
+        start_state: State = (start, None)
+
+        def heuristic(pt: GridPoint) -> int:
+            return (abs(end[0] - pt[0]) + abs(end[1] - pt[1])) * 10
+
+        frontier: list[tuple[int, int, int, GridPoint, Optional[tuple[int, int]]]] = []
+        counter = 0
+        heapq.heappush(frontier, (heuristic(start), counter, 0, start, None))
+
+        best_g: dict[State, int] = {start_state: 0}
+        came_from: dict[State, Optional[State]] = {start_state: None}
+        found_state: Optional[State] = None
+        expanded = 0
+        max_expansions = max(1, rows * cols * 4 + 8)
+
+        while frontier and expanded < max_expansions:
+            _, _, current_g, current, prev_dir = heapq.heappop(frontier)
+            state: State = (current, prev_dir)
+            if current_g != best_g.get(state):
                 continue
+            expanded += 1
+
+            if current == end:
+                found_state = state
+                break
+
             for direction in directions:
                 nr, nc = current[0] + direction[0], current[1] + direction[1]
                 nxt = (nr, nc)
                 if not board_contains(nr, nc, rows, cols) or nxt in blocked:
                     continue
+
                 step_cost = 10
                 if nxt in wire_cells and nxt not in {start, end}:
                     step_cost += 22
                 if prev_dir is not None and direction != prev_dir:
                     step_cost += 4
-                # A tiny Manhattan bias makes equally safe routes look direct.
-                priority = cost + step_cost + abs(end[0] - nr) + abs(end[1] - nc)
-                state = (nxt, direction)
-                new_cost = cost + step_cost
-                if new_cost < best_cost.get(state, 10**12):
-                    best_cost[state] = new_cost
-                    if nxt not in came_from or new_cost < best_end_cost:
-                        came_from[nxt] = current
-                    counter += 1
-                    heapq.heappush(frontier, (priority, counter, nxt, direction))
-        if found is None or end not in came_from:
+
+                next_g = current_g + step_cost
+                next_state: State = (nxt, direction)
+                if next_g >= best_g.get(next_state, 10**12):
+                    continue
+
+                best_g[next_state] = next_g
+                came_from[next_state] = state
+                counter += 1
+                heapq.heappush(frontier, (next_g + heuristic(nxt), counter, next_g, nxt, direction))
+
+        if found_state is None:
             return []
+
         path: list[GridPoint] = []
-        cur: Optional[GridPoint] = end
-        while cur is not None:
-            path.append(cur)
-            cur = came_from.get(cur)
+        state: Optional[State] = found_state
+        guard = 0
+        while state is not None and guard <= max_expansions:
+            point, _ = state
+            path.append(point)
+            state = came_from.get(state)
+            guard += 1
+        if not path or path[-1] != start:
+            return []
         path.reverse()
         return self._compress_route(path)
 
