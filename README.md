@@ -1,6 +1,12 @@
-# Perfboard Planner v29
+# Perfboard Planner v30
 
-This version is an architecture pass. It keeps the current Tkinter frontend, but moves the reusable board logic into a package structure so the program is no longer just one growing script.
+v30 is the first full modern UI rewrite. The older Tkinter UI is still included as a fallback, but the new main interface is built with PySide6/Qt.
+
+## Install
+
+```bash
+python -m pip install -r requirements.txt
+```
 
 ## Run
 
@@ -8,41 +14,54 @@ This version is an architecture pass. It keeps the current Tkinter frontend, but
 python run.py
 ```
 
-or:
+This starts the Qt UI when PySide6 is installed. If PySide6 is missing, it falls back to the legacy Tkinter frontend and prints the install command.
+
+You can also run a specific frontend:
 
 ```bash
-python -m perfboard_planner.app
+python run_qt.py
+python run_tk.py
 ```
 
-## Project layout
+## New v30 UI direction
 
-```text
-perfboard_planner_v29/
-  run.py
-  perfboard_planner/
-    app.py
-    core/
-      models.py        # board data objects
-      storage.py       # JSON loading/saving/migration
-      geometry.py      # mirroring, rotation, grid helpers
-      connectivity.py  # pure net graph helpers
-      checks.py        # pure layout warning helpers
-      routing.py       # route helper functions
-      commands.py      # command stack foundation
-    ui/
-      tk_app.py        # current Tkinter frontend
-```
+The app now uses a modern editor layout:
 
-## What changed internally
+- top toolbar for file actions, undo/redo, modes, side selection, warnings, and BOM
+- central zoomable board canvas
+- left dock for objects, warnings, wire color visibility, footprint library, and BOM
+- right inspector for editing selected objects and project settings
+- status bar with physical front/back hole mapping
 
-- The data model is now in `core/models.py`.
-- JSON save/load is now in `core/storage.py`.
-- Old `version` JSON files are still accepted.
-- New saves use `schema_version` and `app_version`.
-- Obsolete manual wire `layer` / `lane` data is loaded for compatibility but no longer written into new saved layout files.
-- Connectivity helpers now follow the cleaner rule: only explicit wire points/bends are electrical connection points. A wire merely crossing a hole is not treated as connected.
-- The current Tkinter UI is still available as `ui/tk_app.py` while future UI rewrites can reuse the core modules.
+The back side is still shown as a physical mirrored view by default.
 
-## Notes
+## Main interactions
 
-This is not meant as a flashy feature version. It is a foundation version so future UI work can happen without fighting a single massive file.
+- `Ctrl + mouse wheel` zooms around the pointer
+- mouse wheel pans vertically
+- `Shift + mouse wheel` pans horizontally
+- middle/right drag pans the board in Select mode
+- Select mode: click objects, Shift/Ctrl-click for multi-select, drag to move
+- Part mode: click a hole to place the current component template
+- Wire mode: click start, Shift-click bends, normal click finishes
+- Via mode: click a hole to toggle a front/back via
+- Note mode: click a hole to add an annotation
+- Keepout mode: click two corners to create a keepout zone
+- `Delete`/`Backspace` deletes selected unlocked items
+- `R` rotates selected components visually
+
+## Architecture
+
+The core model is separated from the UI:
+
+- `perfboard_planner/core/models.py`
+- `perfboard_planner/core/storage.py`
+- `perfboard_planner/core/geometry.py`
+- `perfboard_planner/core/connectivity.py`
+- `perfboard_planner/core/checks.py`
+- `perfboard_planner/core/routing.py`
+- `perfboard_planner/core/bom.py`
+- `perfboard_planner/ui/qt/` for the new UI
+- `perfboard_planner/ui/tk_app.py` for the legacy UI
+
+Older JSON layouts should still load. New saves use `schema_version` and `app_version` metadata.
