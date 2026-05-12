@@ -1,57 +1,14 @@
+from __future__ import annotations
+
 import json
 import math
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict
 from typing import List, Optional, Tuple, Dict, Any, Set
 
-
-@dataclass
-class ComponentPin:
-    name: str
-    row: int
-    col: int
-
-
-@dataclass
-class ComponentJumper:
-    pin_a: str
-    pin_b: str
-    color: str = "#00aaff"
-
-
-@dataclass
-class Component:
-    name: str
-    row: int
-    col: int
-    width: int
-    height: int
-    color: str
-    side: str = "front"
-    rotation: int = 0  # visual component body angle in degrees
-    show_name: bool = True
-    show_pin_names: bool = True
-    pins: List[ComponentPin] = field(default_factory=list)
-    jumpers: List[ComponentJumper] = field(default_factory=list)
-
-
-@dataclass
-class Wire:
-    name: str
-    points: List[Tuple[int, int]]  # [(row, col), ...]
-    color: str
-    side: str = "front"
-    layer: str = "main"
-    lane: int = 0  # visual parallel offset; saved layout still snaps to real holes
-
-
-@dataclass
-class Via:
-    row: int
-    col: int
-    name: str = ""
-    color: str = "#9c27b0"
+from ..core.models import ComponentPin, ComponentJumper, Component, Wire, Via
+from ..core.storage import layout_from_app, layout_from_dict, layout_to_dict, load_layout_file, save_layout_file
 
 
 class PerfboardPlanner(tk.Tk):
@@ -3677,15 +3634,8 @@ class PerfboardPlanner(tk.Tk):
         )
         if not path:
             return
-        data = {
-            "version": 10,
-            "board": {"rows": self.rows, "cols": self.cols, "spacing": self.spacing},
-            "components": [asdict(c) for c in self.components],
-            "wires": [asdict(w) for w in self.wires],
-            "vias": [asdict(v) for v in self.vias],
-        }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        layout = layout_from_app(self.rows, self.cols, self.spacing, self.components, self.wires, self.vias)
+        save_layout_file(path, layout)
         self.status.set(f"Saved {path}")
 
     def open_file(self):
@@ -3696,41 +3646,14 @@ class PerfboardPlanner(tk.Tk):
         if not path:
             return
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            board = data.get("board", {})
-            self.rows = int(board.get("rows", self.rows))
-            self.cols = int(board.get("cols", self.cols))
-            self.spacing = int(board.get("spacing", self.spacing))
+            layout = load_layout_file(path)
+            self.rows = int(layout.rows)
+            self.cols = int(layout.cols)
+            self.spacing = int(layout.spacing)
             self.update_zoom_label()
-            self.components = []
-            for c in data.get("components", []):
-                pins = [ComponentPin(pin.get("name", ""), int(pin.get("row", 0)), int(pin.get("col", 0))) for pin in c.get("pins", [])]
-                jumpers = [ComponentJumper(j.get("pin_a", ""), j.get("pin_b", ""), j.get("color", "#00aaff")) for j in c.get("jumpers", [])]
-                normalized_pins = self.normalized_pins(pins, int(c.get("width", 1)), int(c.get("height", 1)))
-                self.components.append(Component(
-                    c.get("name", "Part"),
-                    int(c.get("row", 0)),
-                    int(c.get("col", 0)),
-                    int(c.get("width", 1)),
-                    int(c.get("height", 1)),
-                    c.get("color", "#ffcc66"),
-                    side=c.get("side", "front"),
-                    rotation=self.normalized_angle(c.get("rotation", 0)),
-                    show_name=bool(c.get("show_name", True)),
-                    show_pin_names=bool(c.get("show_pin_names", True)),
-                    pins=normalized_pins,
-                    jumpers=self.normalized_jumpers(jumpers, normalized_pins),
-                ))
-            self.wires = [Wire(
-                w.get("name", ""),
-                [tuple(p) for p in w.get("points", [])],
-                w.get("color", "#d00000"),
-                side=w.get("side", "front"),
-                layer="main",
-                lane=self.clamp_wire_lane(w.get("lane", 0)),
-            ) for w in data.get("wires", [])]
-            self.vias = [Via(int(v.get("row", 0)), int(v.get("col", 0)), v.get("name", ""), v.get("color", "#9c27b0")) for v in data.get("vias", [])]
+            self.components = layout.components
+            self.wires = layout.wires
+            self.vias = layout.vias
             self.hidden_wire_colors.clear()
             self._wire_color_menu_signature = None
             self.clear_selection()
@@ -3746,47 +3669,17 @@ class PerfboardPlanner(tk.Tk):
     # State history, vias, nets, checks, and footprint library
     # ------------------------------------------------------------------
     def snapshot_state(self) -> Dict[str, Any]:
-        return {
-            "rows": int(self.rows),
-            "cols": int(self.cols),
-            "spacing": int(self.spacing),
-            "components": [asdict(c) for c in self.components],
-            "wires": [asdict(w) for w in self.wires],
-            "vias": [asdict(v) for v in self.vias],
-        }
+        layout = layout_from_app(self.rows, self.cols, self.spacing, self.components, self.wires, self.vias)
+        return layout_to_dict(layout)
 
     def restore_state(self, state: Dict[str, Any]):
-        self.rows = int(state.get("rows", self.rows))
-        self.cols = int(state.get("cols", self.cols))
-        self.spacing = int(state.get("spacing", self.spacing))
-        self.components = []
-        for c in state.get("components", []):
-            pins = [ComponentPin(pin.get("name", ""), int(pin.get("row", 0)), int(pin.get("col", 0))) for pin in c.get("pins", [])]
-            jumpers = [ComponentJumper(j.get("pin_a", ""), j.get("pin_b", ""), j.get("color", "#00aaff")) for j in c.get("jumpers", [])]
-            normalized_pins = self.normalized_pins(pins, int(c.get("width", 1)), int(c.get("height", 1)))
-            self.components.append(Component(
-                c.get("name", "Part"),
-                int(c.get("row", 0)),
-                int(c.get("col", 0)),
-                int(c.get("width", 1)),
-                int(c.get("height", 1)),
-                c.get("color", "#ffcc66"),
-                side=c.get("side", "front"),
-                rotation=self.normalized_angle(c.get("rotation", 0)),
-                show_name=bool(c.get("show_name", True)),
-                show_pin_names=bool(c.get("show_pin_names", True)),
-                pins=normalized_pins,
-                jumpers=self.normalized_jumpers(jumpers, normalized_pins),
-            ))
-        self.wires = [Wire(
-            w.get("name", ""),
-            [tuple(p) for p in w.get("points", [])],
-            w.get("color", "#d00000"),
-            side=w.get("side", "front"),
-            layer="main",
-            lane=self.clamp_wire_lane(w.get("lane", 0)),
-        ) for w in state.get("wires", [])]
-        self.vias = [Via(int(v.get("row", 0)), int(v.get("col", 0)), v.get("name", ""), v.get("color", "#9c27b0")) for v in state.get("vias", [])]
+        layout = layout_from_dict(state)
+        self.rows = int(layout.rows)
+        self.cols = int(layout.cols)
+        self.spacing = int(layout.spacing)
+        self.components = layout.components
+        self.wires = layout.wires
+        self.vias = layout.vias
         self.clear_selection()
 
     def maybe_capture_undo_state(self):
