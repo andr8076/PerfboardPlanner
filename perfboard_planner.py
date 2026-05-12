@@ -486,8 +486,8 @@ class PerfboardPlanner(tk.Tk):
         ttk.Label(edit_tab, text="Clipboard / multi-select", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         clip_row_a = ttk.Frame(edit_tab)
         clip_row_a.pack(anchor="w", fill=tk.X, pady=(5, 0))
-        ttk.Button(clip_row_a, text="Copy", command=self.copy_selected_component).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(clip_row_a, text="Cut", command=self.cut_selected_component).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        ttk.Button(clip_row_a, text="Copy", command=self.copy_selected_component_component).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(clip_row_a, text="Cut", command=self.cut_selected_component_component).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
         clip_row_b = ttk.Frame(edit_tab)
         clip_row_b.pack(anchor="w", fill=tk.X, pady=(4, 0))
         ttk.Button(clip_row_b, text="Paste", command=self.paste_component).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -819,10 +819,10 @@ class PerfboardPlanner(tk.Tk):
         # the sidebar fields.
         self.canvas.bind("<Delete>", self.delete_selected)
         self.canvas.bind("<BackSpace>", self.delete_selected)
-        self.canvas.bind("<Control-c>", self.copy_selected_component)
-        self.canvas.bind("<Control-C>", self.copy_selected_component)
-        self.canvas.bind("<Control-x>", self.cut_selected_component)
-        self.canvas.bind("<Control-X>", self.cut_selected_component)
+        self.canvas.bind("<Control-c>", self.copy_selected_component_component)
+        self.canvas.bind("<Control-C>", self.copy_selected_component_component)
+        self.canvas.bind("<Control-x>", self.cut_selected_component_component)
+        self.canvas.bind("<Control-X>", self.cut_selected_component_component)
         self.canvas.bind("<Control-v>", self.paste_component)
         self.canvas.bind("<Control-V>", self.paste_component)
         self.canvas.bind("<Control-d>", self.duplicate_selected_component)
@@ -835,10 +835,10 @@ class PerfboardPlanner(tk.Tk):
         self.canvas.bind("<Key-H>", self.trace_selected_net)
         self.canvas.bind("<Key-r>", self.rotate_selected_components)
         self.canvas.bind("<Key-R>", self.rotate_selected_components)
-        self.safe_bind(self.canvas, "<Command-c>", self.copy_selected_component)
-        self.safe_bind(self.canvas, "<Command-C>", self.copy_selected_component)
-        self.safe_bind(self.canvas, "<Command-x>", self.cut_selected_component)
-        self.safe_bind(self.canvas, "<Command-X>", self.cut_selected_component)
+        self.safe_bind(self.canvas, "<Command-c>", self.copy_selected_component_component)
+        self.safe_bind(self.canvas, "<Command-C>", self.copy_selected_component_component)
+        self.safe_bind(self.canvas, "<Command-x>", self.cut_selected_component_component)
+        self.safe_bind(self.canvas, "<Command-X>", self.cut_selected_component_component)
         self.safe_bind(self.canvas, "<Command-v>", self.paste_component)
         self.safe_bind(self.canvas, "<Command-V>", self.paste_component)
         self.safe_bind(self.canvas, "<Command-d>", self.duplicate_selected_component)
@@ -847,10 +847,10 @@ class PerfboardPlanner(tk.Tk):
         self.canvas.bind("<Return>", lambda event: self.finish_temp_wire(event, ask_name=True))
         self.bind("<Delete>", self.delete_selected)
         self.bind("<BackSpace>", self.delete_selected)
-        self.bind("<Control-c>", self.copy_selected_component)
-        self.bind("<Control-C>", self.copy_selected_component)
-        self.bind("<Control-x>", self.cut_selected_component)
-        self.bind("<Control-X>", self.cut_selected_component)
+        self.bind("<Control-c>", self.copy_selected_component_component)
+        self.bind("<Control-C>", self.copy_selected_component_component)
+        self.bind("<Control-x>", self.cut_selected_component_component)
+        self.bind("<Control-X>", self.cut_selected_component_component)
         self.bind("<Control-v>", self.paste_component)
         self.bind("<Control-V>", self.paste_component)
         self.bind("<Control-d>", self.duplicate_selected_component)
@@ -863,10 +863,10 @@ class PerfboardPlanner(tk.Tk):
         self.bind("<Key-H>", self.trace_selected_net)
         self.bind("<Key-r>", self.rotate_selected_components)
         self.bind("<Key-R>", self.rotate_selected_components)
-        self.safe_bind(self, "<Command-c>", self.copy_selected_component)
-        self.safe_bind(self, "<Command-C>", self.copy_selected_component)
-        self.safe_bind(self, "<Command-x>", self.cut_selected_component)
-        self.safe_bind(self, "<Command-X>", self.cut_selected_component)
+        self.safe_bind(self, "<Command-c>", self.copy_selected_component_component)
+        self.safe_bind(self, "<Command-C>", self.copy_selected_component_component)
+        self.safe_bind(self, "<Command-x>", self.cut_selected_component_component)
+        self.safe_bind(self, "<Command-X>", self.cut_selected_component_component)
         self.safe_bind(self, "<Command-v>", self.paste_component)
         self.safe_bind(self, "<Command-V>", self.paste_component)
         self.safe_bind(self, "<Command-d>", self.duplicate_selected_component)
@@ -5479,6 +5479,551 @@ def _v27_add_ui(self):
         pass
 
 PerfboardPlanner.v27_add_ui = _v27_add_ui
+
+
+
+# ----------------------------------------------------------------------
+# v28 UI refresh: modernized layout, cleaner navigation, fixed command
+# areas, contextual creation panels, and less bulky secondary controls.
+# This intentionally keeps the existing data model and drawing logic intact.
+# ----------------------------------------------------------------------
+V28_APP_VERSION = "v28"
+
+
+def _v28_setup_style(self):
+    self._ui_bg = "#f4f6f8"
+    self._panel_bg = "#ffffff"
+    self._muted_bg = "#eef2f6"
+    self._border = "#d7dde5"
+    self._text = "#17202a"
+    self._muted_text = "#64748b"
+    self._accent = "#2563eb"
+    try:
+        self.option_add("*Font", "TkDefaultFont 10")
+        self.configure(bg=self._ui_bg)
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("TFrame", background=self._ui_bg)
+        style.configure("Panel.TFrame", background=self._panel_bg)
+        style.configure("Card.TFrame", background=self._panel_bg, relief="flat")
+        style.configure("Rail.TFrame", background=self._muted_bg)
+        style.configure("TLabel", background=self._ui_bg, foreground=self._text)
+        style.configure("Panel.TLabel", background=self._panel_bg, foreground=self._text)
+        style.configure("Muted.Panel.TLabel", background=self._panel_bg, foreground=self._muted_text)
+        style.configure("Header.TLabel", background=self._panel_bg, foreground=self._text, font=("TkDefaultFont", 15, "bold"))
+        style.configure("Section.TLabel", background=self._panel_bg, foreground=self._text, font=("TkDefaultFont", 10, "bold"))
+        style.configure("Hint.TLabel", background=self._panel_bg, foreground=self._muted_text)
+        style.configure("TButton", padding=(8, 5))
+        style.configure("Primary.TButton", padding=(8, 6), foreground="#ffffff", background=self._accent)
+        style.map("Primary.TButton", background=[("active", "#1d4ed8"), ("pressed", "#1e40af")])
+        style.configure("Toolbutton", padding=(6, 5), relief="flat")
+        style.configure("Segment.TRadiobutton", padding=(6, 6), relief="flat", background=self._muted_bg)
+        style.configure("Segment.TCheckbutton", padding=(6, 6), relief="flat", background=self._muted_bg)
+        style.configure("Modern.TNotebook", background=self._panel_bg, borderwidth=0, tabmargins=(2, 2, 2, 0))
+        style.configure("Modern.TNotebook.Tab", padding=(10, 7), font=("TkDefaultFont", 9, "bold"))
+        style.map("Modern.TNotebook.Tab", background=[("selected", "#ffffff")], foreground=[("selected", self._accent)])
+        style.configure("TSeparator", background=self._border)
+        style.configure("Vertical.TScrollbar", gripcount=0, background="#cfd8e3", darkcolor="#cfd8e3", lightcolor="#cfd8e3", troughcolor=self._muted_bg, bordercolor=self._muted_bg, arrowcolor=self._muted_text)
+        style.configure("Horizontal.TScrollbar", gripcount=0, background="#cfd8e3", darkcolor="#cfd8e3", lightcolor="#cfd8e3", troughcolor=self._muted_bg, bordercolor=self._muted_bg, arrowcolor=self._muted_text)
+    except Exception:
+        pass
+
+
+PerfboardPlanner._v28_setup_style = _v28_setup_style
+
+
+def _v28_card(parent, title=None, subtitle=None):
+    outer = tk.Frame(parent, bg="#d7dde5", bd=0)
+    outer.pack(fill=tk.X, pady=(0, 10))
+    card = tk.Frame(outer, bg="#ffffff", padx=10, pady=9)
+    card.pack(fill=tk.X, padx=1, pady=1)
+    if title:
+        tk.Label(card, text=title, bg="#ffffff", fg="#17202a", anchor="w", font=("TkDefaultFont", 10, "bold")).pack(fill=tk.X)
+    if subtitle:
+        tk.Label(card, text=subtitle, bg="#ffffff", fg="#64748b", anchor="w", justify=tk.LEFT, wraplength=285).pack(fill=tk.X, pady=(2, 6))
+    return card
+
+
+PerfboardPlanner._v28_card = staticmethod(_v28_card)
+
+
+def _v28_btn(parent, text, command, primary=False):
+    return ttk.Button(parent, text=text, command=command, style="Primary.TButton" if primary else "TButton")
+
+
+PerfboardPlanner._v28_btn = staticmethod(_v28_btn)
+
+
+def _v28_button_grid(parent, buttons, columns=2):
+    frame = tk.Frame(parent, bg="#ffffff")
+    frame.pack(fill=tk.X, pady=(6, 0))
+    for c in range(columns):
+        frame.columnconfigure(c, weight=1, uniform="buttons")
+    for i, (text, command) in enumerate(buttons):
+        b = ttk.Button(frame, text=text, command=command)
+        b.grid(row=i // columns, column=i % columns, sticky="ew", padx=(0 if i % columns == 0 else 4, 0), pady=(0, 4))
+    return frame
+
+
+PerfboardPlanner._v28_button_grid = staticmethod(_v28_button_grid)
+
+
+def _v28_field(parent, label, widget):
+    row = tk.Frame(parent, bg="#ffffff")
+    row.pack(fill=tk.X, pady=(4, 0))
+    tk.Label(row, text=label, bg="#ffffff", fg="#64748b", width=10, anchor="w").pack(side=tk.LEFT)
+    widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    return row
+
+
+PerfboardPlanner._v28_field = staticmethod(_v28_field)
+
+
+def _v28_scrollable(parent, bg="#ffffff"):
+    holder = tk.Frame(parent, bg=bg)
+    holder.pack(fill=tk.BOTH, expand=True)
+    holder.rowconfigure(0, weight=1)
+    holder.columnconfigure(0, weight=1)
+    canvas = tk.Canvas(holder, bg=bg, borderwidth=0, highlightthickness=0)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scroll = ttk.Scrollbar(holder, orient=tk.VERTICAL, command=canvas.yview)
+    scroll.grid(row=0, column=1, sticky="ns")
+    canvas.configure(yscrollcommand=scroll.set)
+    inner = tk.Frame(canvas, bg=bg, padx=10, pady=10)
+    window = canvas.create_window((0, 0), window=inner, anchor="nw")
+    def update(_event=None):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.itemconfigure(window, width=canvas.winfo_width())
+    inner.bind("<Configure>", update)
+    canvas.bind("<Configure>", update)
+    def wheel(event):
+        if getattr(event, "num", None) == 4:
+            canvas.yview_scroll(-3, "units")
+        elif getattr(event, "num", None) == 5:
+            canvas.yview_scroll(3, "units")
+        else:
+            canvas.yview_scroll((-1 if event.delta > 0 else 1) * 3, "units")
+        return "break"
+    def bind(_event=None):
+        canvas.bind_all("<MouseWheel>", wheel)
+        canvas.bind_all("<Button-4>", wheel)
+        canvas.bind_all("<Button-5>", wheel)
+    def unbind(_event=None):
+        canvas.unbind_all("<MouseWheel>")
+        canvas.unbind_all("<Button-4>")
+        canvas.unbind_all("<Button-5>")
+    canvas.bind("<Enter>", bind); canvas.bind("<Leave>", unbind)
+    inner.bind("<Enter>", bind); inner.bind("<Leave>", unbind)
+    return inner
+
+
+PerfboardPlanner._v28_scrollable = staticmethod(_v28_scrollable)
+
+
+def _v28_build_ui(self):
+    try:
+        self._v27_ensure_fields()
+    except Exception:
+        pass
+    self._v28_setup_style()
+
+    main_pane = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=8, sashrelief=tk.FLAT, bg="#d7dde5", bd=0)
+    main_pane.pack(fill=tk.BOTH, expand=True)
+
+    side_outer = tk.Frame(main_pane, bg="#ffffff", width=376)
+    side_outer.grid_rowconfigure(1, weight=1)
+    side_outer.grid_columnconfigure(0, weight=1)
+    main_pane.add(side_outer, minsize=300)
+
+    # Header / project identity
+    header = tk.Frame(side_outer, bg="#ffffff", padx=14, pady=12)
+    header.grid(row=0, column=0, sticky="ew")
+    tk.Label(header, text="Perfboard Planner", bg="#ffffff", fg="#17202a", anchor="w", font=("TkDefaultFont", 16, "bold")).pack(fill=tk.X)
+    tk.Label(header, text="Plan, route, check, and build dual-sided perfboard layouts", bg="#ffffff", fg="#64748b", anchor="w", wraplength=330).pack(fill=tk.X, pady=(2, 0))
+
+    self.sidebar_notebook = ttk.Notebook(side_outer, style="Modern.TNotebook")
+    self.sidebar_notebook.grid(row=1, column=0, sticky="nsew", padx=(10, 10), pady=(0, 8))
+
+    # The actual tab frames. Part and Wire remain contextual and are inserted by update_part_tab_visibility().
+    self.tool_tab = tk.Frame(self.sidebar_notebook, bg="#ffffff")
+    self.part_tab = tk.Frame(self.sidebar_notebook, bg="#ffffff")
+    self.wire_tab = tk.Frame(self.sidebar_notebook, bg="#ffffff")
+    self.edit_tab = tk.Frame(self.sidebar_notebook, bg="#ffffff")
+    self.view_tab = tk.Frame(self.sidebar_notebook, bg="#ffffff")
+    self.file_tab = tk.Frame(self.sidebar_notebook, bg="#ffffff")
+
+    self.sidebar_notebook.add(self.tool_tab, text="Work")
+    self.sidebar_notebook.add(self.edit_tab, text="Edit")
+    self.sidebar_notebook.add(self.view_tab, text="View")
+    self.sidebar_notebook.add(self.file_tab, text="File")
+
+    tool = self._v28_scrollable(self.tool_tab)
+    part = self._v28_scrollable(self.part_tab)
+    wire = self._v28_scrollable(self.wire_tab)
+    edit = self._v28_scrollable(self.edit_tab)
+    view = self._v28_scrollable(self.view_tab)
+    file = self._v28_scrollable(self.file_tab)
+
+    # Work tab
+    card = self._v28_card(tool, "Selection", "Most changes start by selecting one or more items on the board.")
+    self._v28_button_grid(card, [
+        ("Edit component", self.edit_selected_component),
+        ("Edit wire", self.edit_selected_wire),
+        ("Bulk edit", self.edit_selected_items),
+        ("Delete", self.delete_selected),
+        ("Duplicate", self.duplicate_selected_component),
+        ("Rotate", self.rotate_selected_components),
+    ], columns=2)
+
+    card = self._v28_card(tool, "Planning", "Warnings, BOM, project data, and build helpers.")
+    self._v28_button_grid(card, [
+        ("Warnings", self.v27_open_warning_list),
+        ("BOM", self.v27_open_bom),
+        ("Project info", self.v27_open_project_info),
+        ("Trace net", self.trace_selected_net),
+        ("Clear trace", self.clear_net_highlight),
+        ("Swap sides", self.swap_all_sides),
+    ], columns=2)
+
+    card = self._v28_card(tool, "Annotations & keepouts", "Notes are real board objects. Keepouts mark mechanical no-go areas.")
+    self._v28_button_grid(card, [
+        ("Note mode", lambda: (self.mode.set("label"), self._mode_changed())),
+        ("Notes", self.v27_open_annotations_manager),
+        ("Keepout mode", lambda: (self.mode.set("keepout"), self._mode_changed())),
+        ("Keepouts", self.v27_open_keepout_manager),
+    ], columns=2)
+
+    card = self._v28_card(tool, "Lock & groups", "Protect finished items or manage circuit blocks/modules.")
+    self._v28_button_grid(card, [
+        ("Lock", lambda: self.v27_set_lock_selected(True)),
+        ("Unlock", lambda: self.v27_set_lock_selected(False)),
+        ("Assign group", self.v27_assign_group_selected),
+        ("Clear group", self.v27_clear_group_selected),
+    ], columns=2)
+
+    card = self._v28_card(tool, "History")
+    self._v28_button_grid(card, [("Undo", self.undo), ("Redo", self.redo)], columns=2)
+
+    # Part tab
+    card = self._v28_card(part, "New component", "These settings are used when you place a new component.")
+    self._v28_field(card, "Name", ttk.Entry(card, textvariable=self.current_name))
+    row = tk.Frame(card, bg="#ffffff"); row.pack(fill=tk.X, pady=(6, 0))
+    tk.Label(row, text="Size", bg="#ffffff", fg="#64748b", width=10, anchor="w").pack(side=tk.LEFT)
+    ttk.Label(row, text="W", style="Panel.TLabel").pack(side=tk.LEFT)
+    ttk.Spinbox(row, from_=1, to=30, textvariable=self.component_w, width=5).pack(side=tk.LEFT, padx=(3, 8))
+    ttk.Label(row, text="H", style="Panel.TLabel").pack(side=tk.LEFT)
+    ttk.Spinbox(row, from_=1, to=30, textvariable=self.component_h, width=5).pack(side=tk.LEFT, padx=(3, 0))
+    angle = ttk.Combobox(card, textvariable=self.current_component_rotation, values=[0,45,90,135,180,225,270,315], width=8, state="readonly")
+    self._v28_field(card, "Angle", angle)
+    self._v28_button_grid(card, [("Color", self.choose_component_color), ("Library", self.v27_open_component_library)], columns=2)
+
+    card = self._v28_card(part, "Component info", "Used for labels, BOM grouping, and later build instructions.")
+    self._v28_field(card, "Type", ttk.Entry(card, textvariable=self.current_component_type))
+    self._v28_field(card, "Value", ttk.Entry(card, textvariable=self.current_component_value))
+    self._v28_field(card, "Category", ttk.Entry(card, textvariable=self.current_component_category))
+
+    card = self._v28_card(part, "Pins & footprint")
+    self.pin_count_label = tk.StringVar(value="Pins: 2")
+    tk.Label(card, textvariable=self.pin_count_label, bg="#ffffff", fg="#64748b", anchor="w").pack(fill=tk.X, pady=(2, 4))
+    self._v28_button_grid(card, [
+        ("Edit template pins", self.edit_new_component_pins),
+        ("Edit selected pins", self.edit_selected_component_pins),
+        ("Save footprint", self.save_selected_footprint),
+        ("Load footprint", self.load_footprint_template),
+    ], columns=2)
+
+    # Wire tab
+    card = self._v28_card(wire, "New wires", "Choose a color, then draw. Overlaps and crossings are handled visually.")
+    color_row = tk.Frame(card, bg="#ffffff"); color_row.pack(fill=tk.X, pady=(5, 0))
+    self.wire_color_preview = tk.Label(color_row, text="      ", bg=self.current_wire_color.get(), relief=tk.FLAT, bd=0)
+    self.wire_color_preview.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+    ttk.Button(color_row, text="Choose wire color", command=self.choose_wire_color).pack(side=tk.LEFT, fill=tk.X, expand=True)
+    self._v28_button_grid(card, [("Suggest route", self.v27_suggest_route_between_holes), ("Apply to selected", self.apply_current_wire_color_to_selected)], columns=2)
+
+    card = self._v28_card(wire, "Existing wires", "Double-click a wire to edit its points, color, side, lock state, and group.")
+    self._v28_button_grid(card, [("Edit selected wire", self.edit_selected_wire), ("Trace selected net", self.trace_selected_net)], columns=2)
+    tk.Label(card, text="Tip: in Select mode you can drag wire endpoint/bend dots directly on the board.", bg="#ffffff", fg="#64748b", justify=tk.LEFT, wraplength=285).pack(fill=tk.X, pady=(6, 0))
+
+    # Edit tab
+    card = self._v28_card(edit, "Clipboard", "Copy/paste supports mixed selections of components and wires.")
+    self._v28_button_grid(card, [
+        ("Copy", self.copy_selected_component),
+        ("Cut", self.cut_selected_component),
+        ("Paste", self.paste_component),
+        ("Duplicate", self.duplicate_selected_component),
+    ], columns=2)
+
+    card = self._v28_card(edit, "Board actions")
+    self._v28_button_grid(card, [
+        ("Resize board", self.resize_board),
+        ("Clear board", self.clear_board),
+        ("Send to other side", self.move_selected_to_other_side),
+        ("Swap all sides", self.swap_all_sides),
+    ], columns=2)
+
+    card = self._v28_card(edit, "Selection shortcuts", "Shift/Ctrl/Cmd-click adds or removes from selection. Drag a selected component to move the whole selection.")
+    tk.Label(card, text="R = rotate selected components\nDelete/Backspace = delete selected\nH = trace selected net", bg="#ffffff", fg="#64748b", justify=tk.LEFT, anchor="w").pack(fill=tk.X)
+
+    # View tab
+    card = self._v28_card(view, "Zoom & camera")
+    self._v28_button_grid(card, [("− Zoom", self.zoom_out_key), ("+ Zoom", self.zoom_in_key), ("Reset", self.reset_zoom_key)], columns=3)
+    tk.Label(card, text="Ctrl+wheel zooms around the pointer. Middle-drag or right-drag pans the board.", bg="#ffffff", fg="#64748b", justify=tk.LEFT, wraplength=285).pack(fill=tk.X, pady=(6, 0))
+
+    card = self._v28_card(view, "Opposite-side ghost layers")
+    for text, var in [("Components", self.show_opposite_layer), ("Pins", self.show_opposite_pins), ("Wires", self.show_opposite_wires)]:
+        ttk.Checkbutton(card, text=text, variable=var, command=self.toggle_layer_display, style="Toolbutton").pack(fill=tk.X, pady=(3, 0))
+
+    card = self._v28_card(view, "Labels")
+    ttk.Checkbutton(card, text="Show component names", variable=self.show_component_names, command=self.redraw, style="Toolbutton").pack(fill=tk.X, pady=(3, 0))
+    ttk.Checkbutton(card, text="Show pin names", variable=self.show_component_pin_names, command=self.redraw, style="Toolbutton").pack(fill=tk.X, pady=(3, 0))
+
+    card = self._v28_card(view, "Live checks")
+    ttk.Checkbutton(card, text="Highlight warnings on board", variable=self.show_layout_warnings, command=self.redraw, style="Toolbutton").pack(fill=tk.X, pady=(3, 0))
+    ttk.Checkbutton(card, text="Show pin connection counts", variable=self.show_pin_connection_counts, command=self.redraw, style="Toolbutton").pack(fill=tk.X, pady=(3, 0))
+    ttk.Checkbutton(card, text="Count both sides", variable=self.pin_connection_count_both_sides, command=self.redraw, style="Toolbutton").pack(fill=tk.X, pady=(3, 0))
+    limit_row = tk.Frame(card, bg="#ffffff"); limit_row.pack(fill=tk.X, pady=(6, 0))
+    tk.Label(limit_row, text="Max per pin", bg="#ffffff", fg="#64748b", anchor="w").pack(side=tk.LEFT)
+    ttk.Spinbox(limit_row, from_=0, to=20, textvariable=self.pin_connection_limit, width=6, command=self.redraw).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(card, text="Open warning list", command=self.v27_open_warning_list).pack(fill=tk.X, pady=(8, 0))
+
+    # File tab
+    card = self._v28_card(file, "Project files")
+    self._v28_button_grid(card, [
+        ("New", self.new_file),
+        ("Open JSON", self.open_file),
+        ("Save JSON", self.save_file),
+        ("Export PNG", self.export_png),
+    ], columns=2)
+    self._v28_button_grid(card, [("Project info", self.v27_open_project_info), ("Bill of materials", self.v27_open_bom)], columns=2)
+
+    card = self._v28_card(file, "Help", "The back side is always shown physically mirrored, so it matches the real board when flipped over.")
+    help_text = (
+        "Modes are fixed at the bottom so they are always reachable.\n\n"
+        "Wire: click start/end. Shift-click adds bend points.\n"
+        "Via: click a hole to connect front and back.\n"
+        "Note: adds an annotation object.\n"
+        "Keepout: click two corners.\n\n"
+        "Right-side color swatches hide/show wire colors."
+    )
+    tk.Label(card, text=help_text, bg="#ffffff", fg="#64748b", justify=tk.LEFT, wraplength=285).pack(fill=tk.X)
+
+    # Fixed bottom area: warnings/status above permanent mode/layer controls.
+    status_box = tk.Frame(side_outer, bg="#ffffff", padx=12, pady=8)
+    status_box.grid(row=2, column=0, sticky="ew")
+    self.layout_warning_label = tk.Label(status_box, textvariable=self.layout_warning_text, anchor="w", justify=tk.LEFT, bg="#ffffff", fg="#0b6f2a", font=("TkDefaultFont", 9, "bold"))
+    self.layout_warning_label.pack(fill=tk.X)
+    self.status = tk.StringVar(value="Ready")
+    tk.Label(status_box, textvariable=self.status, anchor="w", justify=tk.LEFT, bg="#ffffff", fg="#64748b", wraplength=330).pack(fill=tk.X, pady=(3, 0))
+
+    quickbar = tk.Frame(side_outer, bg="#eef2f6", padx=10, pady=9)
+    quickbar.grid(row=3, column=0, sticky="ew")
+    tk.Label(quickbar, text="MODE", bg="#eef2f6", fg="#64748b", anchor="w", font=("TkDefaultFont", 8, "bold")).pack(fill=tk.X)
+    mode_tabs = tk.Frame(quickbar, bg="#eef2f6")
+    mode_tabs.pack(fill=tk.X, pady=(3, 8))
+    modes = [("Select", "select"), ("Part", "component"), ("Wire", "wire"), ("Via", "via"), ("Note", "label"), ("Keep", "keepout")]
+    for i, (text_label, value) in enumerate(modes):
+        rb = ttk.Radiobutton(mode_tabs, text=text_label, variable=self.mode, value=value, command=self._mode_changed, style="Toolbutton", width=6)
+        rb.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3 if i < len(modes)-1 else 0))
+
+    tk.Label(quickbar, text="SIDE & GHOSTS", bg="#eef2f6", fg="#64748b", anchor="w", font=("TkDefaultFont", 8, "bold")).pack(fill=tk.X)
+    layer_tabs = tk.Frame(quickbar, bg="#eef2f6")
+    layer_tabs.pack(fill=tk.X, pady=(3, 0))
+    controls = [
+        ("radio", "Front", self.current_side, "front", self._side_changed),
+        ("radio", "Back", self.current_side, "back", self._side_changed),
+        ("check", "Parts", self.show_opposite_layer, None, self.toggle_layer_display),
+        ("check", "Pins", self.show_opposite_pins, None, self.toggle_layer_display),
+        ("check", "Wire", self.show_opposite_wires, None, self.toggle_layer_display),
+    ]
+    for i, (kind, text_label, var, value, cmd) in enumerate(controls):
+        if kind == "radio":
+            w = ttk.Radiobutton(layer_tabs, text=text_label, variable=var, value=value, command=cmd, style="Toolbutton", width=6)
+        else:
+            w = ttk.Checkbutton(layer_tabs, text=text_label, variable=var, command=cmd, style="Toolbutton", width=6)
+        w.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3 if i < len(controls)-1 else 0))
+
+    # Board area
+    board_area = tk.Frame(main_pane, bg="#f4f6f8")
+    board_area.grid_rowconfigure(1, weight=1)
+    board_area.grid_columnconfigure(0, weight=1)
+    main_pane.add(board_area, minsize=420)
+    self.after(80, lambda: main_pane.sash_place(0, 376, 0))
+
+    topbar = tk.Frame(board_area, bg="#ffffff", padx=12, pady=8)
+    topbar.grid(row=0, column=0, columnspan=2, sticky="ew")
+    self.mode_banner = tk.Label(topbar, text="", anchor="w", padx=10, pady=6, bg="#2563eb", fg="#ffffff", font=("TkDefaultFont", 10, "bold"))
+    self.mode_banner.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    ttk.Button(topbar, text="Warnings", command=self.v27_open_warning_list).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(topbar, text="BOM", command=self.v27_open_bom).pack(side=tk.LEFT, padx=(4, 0))
+
+    board_content = tk.Frame(board_area, bg="#f4f6f8")
+    board_content.grid(row=1, column=0, sticky="nsew")
+    board_content.grid_rowconfigure(0, weight=1)
+    board_content.grid_columnconfigure(0, weight=1)
+
+    self.canvas_border = tk.Frame(board_content, bg="#2563eb", padx=3, pady=3)
+    self.canvas_border.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=(10, 10))
+    self.canvas_border.rowconfigure(0, weight=1)
+    self.canvas_border.columnconfigure(0, weight=1)
+
+    self.canvas = tk.Canvas(self.canvas_border, bg="#f8fafc", highlightthickness=0, takefocus=True)
+    self.canvas.grid(row=0, column=0, sticky="nsew")
+    v_scroll = ttk.Scrollbar(self.canvas_border, orient=tk.VERTICAL, command=self.canvas.yview)
+    h_scroll = ttk.Scrollbar(self.canvas_border, orient=tk.HORIZONTAL, command=self.canvas.xview)
+    v_scroll.grid(row=0, column=1, sticky="ns")
+    h_scroll.grid(row=1, column=0, sticky="ew")
+    self.canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
+
+    # Compact wire color rail. It is visual-first: swatches are the filter buttons.
+    self.wire_color_panel = tk.Frame(board_content, bg="#eef2f6", width=48, padx=4, pady=8)
+    self.wire_color_panel.grid(row=0, column=1, sticky="ns", padx=(8, 10), pady=(10, 10))
+    self.wire_color_panel.grid_propagate(False)
+    tk.Label(self.wire_color_panel, text="Wire", bg="#eef2f6", fg="#64748b", font=("TkDefaultFont", 8, "bold")).pack(anchor="center")
+    tk.Button(self.wire_color_panel, text="All", font=("TkDefaultFont", 8), padx=2, pady=1, relief=tk.FLAT, bg="#ffffff", command=self.show_all_wire_colors).pack(fill=tk.X, pady=(5, 7))
+    self.wire_color_list = tk.Frame(self.wire_color_panel, bg="#eef2f6")
+    self.wire_color_list.pack(fill=tk.BOTH, expand=True)
+
+    # Canvas bindings
+    self.canvas.bind("<Button-1>", self.on_click)
+    self.canvas.bind("<Double-Button-1>", self.on_double_click)
+    self.canvas.bind("<B1-Motion>", self.on_drag)
+    self.canvas.bind("<ButtonRelease-1>", self.on_release)
+    self.canvas.bind("<Motion>", self.on_motion)
+    self.canvas.bind("<ButtonPress-2>", self.start_pan)
+    self.canvas.bind("<B2-Motion>", self.do_pan)
+    self.canvas.bind("<ButtonPress-3>", self.on_right_click)
+    self.canvas.bind("<B3-Motion>", self.on_right_drag)
+    self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
+    self.canvas.bind("<Button-4>", self.on_linux_wheel_up)
+    self.canvas.bind("<Button-5>", self.on_linux_wheel_down)
+    self.canvas.bind("<Key-plus>", self.zoom_in_key)
+    self.canvas.bind("<Key-equal>", self.zoom_in_key)
+    self.canvas.bind("<Key-minus>", self.zoom_out_key)
+    self.canvas.bind("<Key-0>", self.reset_zoom_key)
+    self.canvas.bind("<Delete>", self.delete_selected)
+    self.canvas.bind("<BackSpace>", self.delete_selected)
+    self.canvas.bind("<Escape>", self.cancel_temp_wire)
+    self.canvas.bind("<Return>", self.finish_temp_wire)
+    self.canvas.bind("<KP_Enter>", self.finish_temp_wire)
+    self.canvas.bind("<Control-c>", self.copy_selected_component)
+    self.canvas.bind("<Control-x>", self.cut_selected_component)
+    self.canvas.bind("<Control-v>", self.paste_component)
+    self.canvas.bind("<Control-d>", self.duplicate_selected_component)
+    self.canvas.bind("<Control-z>", self.undo)
+    self.canvas.bind("<Control-y>", self.redo)
+    self.canvas.bind("<Command-c>", self.copy_selected_component)
+    self.canvas.bind("<Command-x>", self.cut_selected_component)
+    self.canvas.bind("<Command-v>", self.paste_component)
+    self.canvas.bind("<Command-d>", self.duplicate_selected_component)
+    self.canvas.bind("<Command-z>", self.undo)
+    self.canvas.bind("<Command-y>", self.redo)
+    self.canvas.bind("<Key-r>", self.rotate_selected_components)
+    self.canvas.bind("<Key-R>", self.rotate_selected_components)
+    self.canvas.bind("<Key-h>", self.trace_selected_net)
+    self.canvas.bind("<Key-H>", self.trace_selected_net)
+
+    self.drag_start_grid = None
+    self.drag_component_original = None
+    self.drag_component_originals = {}
+    self.drag_wire_originals = {}
+    self.pan_last = None
+    self.update_pin_count_label()
+    self._update_mode_ui()
+
+
+PerfboardPlanner._build_ui = _v28_build_ui
+
+
+def _v28_update_mode_ui(self):
+    if hasattr(self, "sidebar_notebook"):
+        self.update_part_tab_visibility()
+    if not hasattr(self, "mode_banner"):
+        return
+    style = self._mode_style()
+    side = self.current_side_label()
+    if self.current_side.get() == "back":
+        side += " · physical mirror"
+    ghosts = []
+    if self.show_opposite_layer.get(): ghosts.append("parts")
+    if self.show_opposite_pins.get(): ghosts.append("pins")
+    if self.show_opposite_wires.get(): ghosts.append("wires")
+    ghost_text = "Ghost: " + (", ".join(ghosts) if ghosts else "off")
+    label = style.get("label", self.mode.get()).title()
+    hint = style.get("hint", "")
+    self.mode_banner.configure(text=f"{side}  ·  {label}    {ghost_text}\n{hint}", bg=style.get("color", "#2563eb"))
+    self.canvas_border.configure(bg=style.get("color", "#2563eb"))
+    if hasattr(self, "wire_color_preview"):
+        try:
+            self.wire_color_preview.configure(bg=self.current_wire_color.get())
+        except Exception:
+            pass
+
+
+PerfboardPlanner._update_mode_ui = _v28_update_mode_ui
+
+
+def _v28_choose_wire_color(self):
+    color = colorchooser.askcolor(color=self.current_wire_color.get(), title="Choose wire color")
+    if color and color[1]:
+        self.current_wire_color.set(color[1])
+        if hasattr(self, "wire_color_preview"):
+            self.wire_color_preview.configure(bg=color[1])
+        self.status.set(f"Wire color set to {color[1]}.")
+
+
+PerfboardPlanner.choose_wire_color = _v28_choose_wire_color
+
+
+def _v28_update_wire_color_menu(self):
+    if not hasattr(self, "wire_color_list"):
+        return
+    summary = self.used_wire_color_summary()
+    signature = tuple((color, front, back, total, color in self.hidden_wire_colors) for color, front, back, total in summary)
+    if signature == getattr(self, "_wire_color_menu_signature", None):
+        return
+    self._wire_color_menu_signature = signature
+    for child in self.wire_color_list.winfo_children():
+        child.destroy()
+    panel_bg = "#eef2f6"
+    for color, front, back, total in summary:
+        hidden = color in self.hidden_wire_colors
+        frame = tk.Frame(self.wire_color_list, bg=panel_bg)
+        frame.pack(fill=tk.X, pady=(0, 5))
+        fg = "#ffffff" if not hidden else "#64748b"
+        relief = tk.SUNKEN if hidden else tk.RAISED
+        label = "×" if hidden else str(total)
+        btn = tk.Label(frame, text=label, bg=color if not hidden else "#f8fafc", fg=fg, relief=relief, bd=1, width=4, height=2, font=("TkDefaultFont", 8, "bold"))
+        btn.pack(fill=tk.X)
+        if hidden:
+            try:
+                btn.configure(cursor="hand2")
+            except Exception:
+                pass
+            hatch = tk.Canvas(btn, width=1, height=1, highlightthickness=0, bg="#f8fafc")
+        status_text = f"{color}: {total} wire{'s' if total != 1 else ''} ({front} front, {back} back). Click to {'show' if hidden else 'hide'}."
+        btn.bind("<Button-1>", lambda _e, c=color: self.toggle_wire_color_visibility(c))
+        btn.bind("<Enter>", lambda _e, text=status_text: self.status.set(text))
+        btn.bind("<Leave>", lambda _e: self.status.set("Ready"))
+    if not summary:
+        tk.Label(self.wire_color_list, text="—", bg=panel_bg, fg="#94a3b8").pack(pady=6)
+
+
+PerfboardPlanner.update_wire_color_menu = _v28_update_wire_color_menu
+
+
+def _v28_add_ui(self):
+    # v28 builds the v27 controls directly into the refreshed UI, so the old
+    # append-only v27 UI extender is intentionally skipped.
+    try:
+        self.title("Perfboard Planner")
+    except Exception:
+        pass
+
+
+PerfboardPlanner.v27_add_ui = _v28_add_ui
 
 if __name__ == "__main__":
     app = PerfboardPlanner()
