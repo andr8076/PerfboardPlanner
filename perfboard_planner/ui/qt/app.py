@@ -54,10 +54,28 @@ from .board_view import BoardView, Selection
 from .style import APP_STYLESHEET
 
 
+class CompactTabWidget(QTabWidget):
+    """A QTabWidget that is willing to shrink inside a dock.
+
+    Qt's default tab widget minimum size can be dominated by the widest tab page
+    or a long tab row. That made the left project dock refuse to collapse after
+    the Groups panel gained longer controls. The content can scroll/clip safely,
+    so the dock should be allowed to get narrow.
+    """
+
+    def minimumSizeHint(self) -> QSize:  # pragma: no cover - UI sizing helper
+        hint = super().minimumSizeHint()
+        return QSize(150, hint.height())
+
+    def sizeHint(self) -> QSize:  # pragma: no cover - UI sizing helper
+        hint = super().sizeHint()
+        return QSize(260, hint.height())
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Perfboard Planner v33")
+        self.setWindowTitle("Perfboard Planner v34")
         self.resize(1500, 940)
         self.setMinimumSize(980, 640)
         self.current_path: Optional[Path] = None
@@ -239,8 +257,12 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Project", self)
         dock.setObjectName("ProjectDock")
         dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        dock.setMinimumWidth(300)
-        tabs = QTabWidget()
+        dock.setMinimumWidth(150)
+        dock.setMinimumSize(150, 160)
+        dock.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        tabs = CompactTabWidget()
+        tabs.setMinimumWidth(0)
+        tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         dock.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         self.left_tabs = tabs
@@ -277,7 +299,10 @@ class MainWindow(QMainWindow):
         self.clear_group_button = QPushButton("Clear group from selected")
         groups_layout.addWidget(self.assign_group_button)
         groups_layout.addWidget(self.clear_group_button)
-        groups_layout.addWidget(QLabel("Tip: groups are modules. Select a group to move/delete/lock it together, or hide completed sections."))
+        group_tip = QLabel("Tip: groups are modules. Select a group to move/delete/lock it together, or hide completed sections.")
+        group_tip.setWordWrap(True)
+        group_tip.setObjectName("MutedLabel")
+        groups_layout.addWidget(group_tip)
         tabs.addTab(groups_tab, "Groups")
 
         # Warnings
@@ -304,7 +329,21 @@ class MainWindow(QMainWindow):
         lib_layout.addWidget(self.library_list)
         tabs.addTab(library_tab, "Library")
 
+        self._make_project_dock_shrinkable(dock)
+
         self.bom_table = None
+
+    def _make_project_dock_shrinkable(self, dock: QDockWidget) -> None:
+        """Allow the left project dock to collapse to a useful narrow width."""
+        for child in dock.findChildren(QWidget):
+            child.setMinimumWidth(0)
+            if isinstance(child, (QPushButton, QToolButton)):
+                child.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            elif isinstance(child, QLabel):
+                child.setWordWrap(True)
+                child.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            elif isinstance(child, (QListWidget, QTabWidget)):
+                child.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def _build_right_dock(self) -> None:
         dock = QDockWidget("Inspector", self)

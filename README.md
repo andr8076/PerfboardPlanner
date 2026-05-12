@@ -1,6 +1,6 @@
-# Perfboard Planner v33
+# Perfboard Planner v34
 
-v33 refines the Qt workflow based on real use: route suggestion snaps to visible component pins, the Suggest Route action lives in the bottom board bar, Part/Wire settings only appear when those modes are active, groups now work as useful modules, and warnings can be muted when you intentionally accept them. The older Tkinter UI is still included as a fallback.
+v34 refines the Qt workflow based on real use: route suggestion snaps to visible component pins, the Suggest Route action lives in the bottom board bar, Part/Wire settings only appear when those modes are active, groups now work as useful modules, and warnings can be muted when you intentionally accept them. The older Tkinter UI is still included as a fallback.
 
 ## Install
 
