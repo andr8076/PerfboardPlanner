@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Tuple
+from typing import List
 
-from .models import Component, Layout
+from .models import Layout
 
 
 @dataclass(frozen=True)

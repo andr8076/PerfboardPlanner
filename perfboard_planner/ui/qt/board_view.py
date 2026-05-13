@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import Dict, Iterable, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QBrush, QWheelEvent
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
-from ...core.geometry import board_contains, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment
-from ...core.models import Annotation, Component, ComponentPin, KeepoutZone, Layout, Via, Wire
-from ...core.routing import simple_dogleg_route
+from ...core.geometry import board_contains, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment, rotate_component_footprint_90
+from ...core.models import Component, ComponentPin, KeepoutZone, Layout, Via, Wire
 
 Selection = Tuple[str, int]
 GridPoint = Tuple[int, int]
+UI_FONT_FAMILY = ""
 
 
 class BoardView(QWidget):
@@ -83,6 +83,7 @@ class BoardView(QWidget):
     def set_layout(self, layout: Layout) -> None:
         self.layout_model = layout
         self.hidden_groups.clear()
+        self.hidden_wire_colors.clear()
         self.highlighted_groups.clear()
         self.selected.clear()
         self.temp_wire.clear()
@@ -257,7 +258,7 @@ class BoardView(QWidget):
         # out, especially along the top edge.
         painter.save()
         font_size = max(6, min(11, int(8.0 * self.zoom)))
-        painter.setFont(QFont("Segoe UI", font_size, QFont.Weight.Bold))
+        painter.setFont(QFont(UI_FONT_FAMILY, font_size, QFont.Weight.Bold))
         rail_bg = QColor(15, 23, 42, 118)
         text_color = QColor("#dbeafe")
         tick_pen = QPen(QColor(219, 234, 254, 88), max(1.0, 1.0 * self.zoom))
@@ -339,7 +340,7 @@ class BoardView(QWidget):
         painter.drawArc(QRectF(x + 22, y + 14, 44, 36), 35 * 16, 285 * 16)
         painter.drawLine(QPointF(x + 61, center_y - 14), QPointF(x + 72, center_y - 6))
         painter.drawLine(QPointF(x + 61, center_y - 14), QPointF(x + 61, center_y - 1))
-        painter.setFont(QFont("Segoe UI", max(11, int(14 * self.zoom)), QFont.Weight.Bold))
+        painter.setFont(QFont(UI_FONT_FAMILY, max(11, int(14 * self.zoom)), QFont.Weight.Bold))
         painter.drawText(rect.adjusted(90, 0, -16, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.flip_cue_text)
 
     def _draw_shadow_panel(self, painter: QPainter) -> None:
@@ -842,14 +843,14 @@ class BoardView(QWidget):
                     painter.drawText(QRectF(p.x()+5*self.zoom, p.y()-13*self.zoom, 16*self.zoom, 14*self.zoom), Qt.AlignmentFlag.AlignCenter, str(count))
             if (self.show_pin_names and comp.show_pin_names and not ghost) or (ghost and self.show_other_pins):
                 painter.setPen(self._color("#111827", 0.65 if not ghost else 0.32))
-                painter.setFont(QFont("Segoe UI", max(7, int(8 * self.zoom))))
+                painter.setFont(QFont(UI_FONT_FAMILY, max(7, int(8 * self.zoom))))
                 painter.drawText(QPointF(p.x() + 7 * self.zoom, p.y() - 7 * self.zoom), pin.name)
         if self.show_component_names and comp.show_name and not ghost:
             painter.setPen(QColor("#0f172a"))
-            painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, comp.name)
             if comp.value:
-                painter.setFont(QFont("Segoe UI", max(7, int(8 * self.zoom))))
+                painter.setFont(QFont(UI_FONT_FAMILY, max(7, int(8 * self.zoom))))
                 painter.drawText(rect.adjusted(0, 16*self.zoom, 0, 0), Qt.AlignmentFlag.AlignCenter, comp.value)
 
     def _draw_wires(self, painter: QPainter, *, ghost: bool) -> None:
@@ -892,7 +893,7 @@ class BoardView(QWidget):
         if wire.name and not ghost and len(pts) >= 2:
             mid = pts[len(pts)//2]
             painter.setPen(QColor("#111827"))
-            painter.setFont(QFont("Segoe UI", max(7, int(8 * self.zoom))))
+            painter.setFont(QFont(UI_FONT_FAMILY, max(7, int(8 * self.zoom))))
             painter.drawText(QPointF(mid.x()+8*self.zoom, mid.y()-8*self.zoom), wire.name)
 
     def _draw_vias(self, painter: QPainter) -> None:
@@ -1020,7 +1021,7 @@ class BoardView(QWidget):
             painter.setBrush(QColor(color.red(), color.green(), color.blue(), 20))
             painter.setPen(QPen(color, 1.6, Qt.PenStyle.DashLine))
             painter.drawRoundedRect(rect, 14, 14)
-            painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             painter.setPen(color)
             painter.drawText(rect.adjusted(8, 2, -8, -2), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, group)
 
@@ -1052,7 +1053,7 @@ class BoardView(QWidget):
         if not route:
             painter.save()
             painter.setPen(QPen(QColor("#ef4444"), max(2.0, 2.4 * self.zoom)))
-            painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             p = self.grid_to_view(*start)
             painter.drawText(QPointF(p.x() + 12 * self.zoom, p.y() - 12 * self.zoom), "No safe route")
             painter.restore()
@@ -1105,7 +1106,7 @@ class BoardView(QWidget):
             painter.setPen(QPen(QColor("#ef4444") if invalid else QColor("#2457d6"), 2, Qt.PenStyle.DashLine))
             painter.drawRoundedRect(rect, 10, 10)
             painter.setPen(QColor("#0f172a"))
-            painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             painter.drawText(rect.adjusted(8, -22, -8, -4), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, comp.name)
         elif self.tool == "via":
             p = self.grid_to_view(*grid)
@@ -1182,7 +1183,7 @@ class BoardView(QWidget):
         if y < 8:
             y = rect.bottom() + 14
         painter.save()
-        painter.setFont(QFont("Segoe UI", max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+        painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
         for action, label in labels:
             brect = QRectF(x, y, size if action != "pins" else size * 1.55, size)
             self._quick_button_rects[action] = brect
@@ -1543,14 +1544,15 @@ class BoardView(QWidget):
 
     def rotate_selected(self) -> None:
         comps = [idx for kind, idx in self.selected if kind == "component" and 0 <= idx < len(self.layout_model.components)]
-        if not comps:
+        unlocked = [idx for idx in comps if not self.layout_model.components[idx].locked]
+        if not unlocked:
             return
-        self.beforeLayoutChange.emit("Rotate components")
-        for idx in comps:
+        self.beforeLayoutChange.emit("Rotate component footprints")
+        for idx in unlocked:
             comp = self.layout_model.components[idx]
-            if comp.locked:
-                continue
-            comp.rotation = (int(comp.rotation) + 90) % 360
+            rotate_component_footprint_90(comp)
+            comp.row = max(0, min(self.layout_model.rows - comp.height, comp.row))
+            comp.col = max(0, min(self.layout_model.cols - comp.width, comp.col))
         self.layoutChanged.emit(); self.update()
 
     def _collection(self, kind: str):

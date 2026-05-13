@@ -4,7 +4,7 @@ import copy
 import json
 import sys
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Optional
 
 from PySide6.QtCore import Qt, QSize, QPointF, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen, QShortcut, QBrush, QPainterPath
@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -48,11 +47,40 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.bom import bom_csv, bom_rows
+from ...core.geometry import rotate_component_footprint_90
 from ...core.checks import LayoutWarning, layout_warnings, pin_connection_counts
-from ...core.models import Annotation, Component, ComponentJumper, ComponentPin, KeepoutZone, Layout, Via, Wire
+from ...core.models import Annotation, Component, ComponentJumper, ComponentPin, Layout
 from ...core.storage import layout_from_dict, layout_to_dict, load_layout_file, save_layout_file
 from .board_view import BoardView, Selection
 from .style import APP_STYLESHEET
+
+
+def _side_pins(left: list[str], right: list[str], width: int) -> list[ComponentPin]:
+    pins = [ComponentPin(name, row, -1) for row, name in enumerate(left)]
+    pins.extend(ComponentPin(name, row, width) for row, name in enumerate(right))
+    return pins
+
+
+FOOTPRINT_LIBRARY: list[dict] = [
+    {"label": "Resistor · 2-pin", "name": "R", "type": "resistor", "category": "Passive", "value": "", "width": 3, "height": 1, "pins": [ComponentPin("A", 0, 0), ComponentPin("B", 0, 2)]},
+    {"label": "Capacitor · 2-pin", "name": "C", "type": "capacitor", "category": "Passive", "value": "", "width": 2, "height": 1, "pins": [ComponentPin("+", 0, 0), ComponentPin("-", 0, 1)]},
+    {"label": "Electrolytic capacitor", "name": "C", "type": "electrolytic capacitor", "category": "Passive", "value": "", "width": 2, "height": 2, "pins": [ComponentPin("+", 0, 0), ComponentPin("-", 1, 0)]},
+    {"label": "LED · 2-pin", "name": "LED", "type": "led", "category": "Semiconductor", "value": "", "width": 3, "height": 1, "pins": [ComponentPin("A", 0, 0), ComponentPin("K", 0, 2)]},
+    {"label": "Diode · 2-pin", "name": "D", "type": "diode", "category": "Semiconductor", "value": "", "width": 3, "height": 1, "pins": [ComponentPin("A", 0, 0), ComponentPin("K", 0, 2)]},
+    {"label": "Transistor TO-92", "name": "Q", "type": "TO-92 transistor", "category": "Semiconductor", "value": "", "width": 3, "height": 1, "pins": [ComponentPin("E", 0, 0), ComponentPin("B", 0, 1), ComponentPin("C", 0, 2)]},
+    {"label": "DIP-8", "name": "U", "type": "DIP-8", "category": "IC", "value": "", "width": 4, "height": 4, "pins": _side_pins(["1", "2", "3", "4"], ["8", "7", "6", "5"], 4)},
+    {"label": "DIP-14", "name": "U", "type": "DIP-14", "category": "IC", "value": "", "width": 4, "height": 7, "pins": _side_pins([str(i) for i in range(1, 8)], [str(i) for i in range(14, 7, -1)], 4)},
+    {"label": "DIP-16", "name": "U", "type": "DIP-16", "category": "IC", "value": "", "width": 4, "height": 8, "pins": _side_pins([str(i) for i in range(1, 9)], [str(i) for i in range(16, 8, -1)], 4)},
+    {"label": "Pin header · 4", "name": "J", "type": "pin header", "category": "Connector", "value": "", "width": 1, "height": 4, "pins": [ComponentPin(f"P{i+1}", i, 0) for i in range(4)]},
+    {"label": "Pin header · 8", "name": "J", "type": "pin header", "category": "Connector", "value": "", "width": 1, "height": 8, "pins": [ComponentPin(f"P{i+1}", i, 0) for i in range(8)]},
+    {"label": "Screw terminal · 2", "name": "J", "type": "screw terminal", "category": "Connector", "value": "", "width": 2, "height": 1, "pins": [ComponentPin("P1", 0, 0), ComponentPin("P2", 0, 1)]},
+    {"label": "Arduino Pro Micro", "name": "U", "type": "Arduino Pro Micro", "category": "Module", "value": "ATmega32U4", "width": 7, "height": 12, "pins": _side_pins(["TX0", "RX1", "GND", "GND", "2", "3", "4", "5", "6", "7", "8", "9"], ["RAW", "GND", "RST", "VCC", "A3", "A2", "A1", "A0", "15", "14", "16", "10"], 7)},
+    {"label": "Arduino Nano", "name": "U", "type": "Arduino Nano", "category": "Module", "value": "ATmega328P", "width": 7, "height": 15, "pins": _side_pins(["D1/TX", "D0/RX", "RST", "GND", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12"], ["VIN", "GND", "RST", "5V", "A7", "A6", "A5", "A4", "A3", "A2", "A1", "A0", "REF", "3V3", "D13"], 7)},
+    {"label": "Arduino Uno R3 headers", "name": "U", "type": "Arduino Uno R3 headers", "category": "Module", "value": "ATmega328P", "width": 18, "height": 10, "pins": [ComponentPin(name, 0, col) for col, name in enumerate(["IOREF", "RST", "3V3", "5V", "GND", "GND", "VIN"])] + [ComponentPin(name, 3, col) for col, name in enumerate(["A0", "A1", "A2", "A3", "A4/SDA", "A5/SCL"])] + [ComponentPin(name, 7, 10 + i) for i, name in enumerate(["D0/RX", "D1/TX", "D2", "D3", "D4", "D5", "D6", "D7"])] + [ComponentPin(name, 9, 8 + i) for i, name in enumerate(["AREF", "GND", "D13", "D12", "D11", "D10", "D9", "D8"])]},
+    {"label": "Arduino Mega 2560 headers", "name": "U", "type": "Arduino Mega 2560 headers", "category": "Module", "value": "ATmega2560", "width": 22, "height": 18, "pins": [ComponentPin(name, 0, i) for i, name in enumerate(["IOREF", "RST", "3V3", "5V", "GND", "GND", "VIN"])] + [ComponentPin(name, 3, i) for i, name in enumerate(["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12", "A13", "A14", "A15"])] + [ComponentPin(name, 10, i) for i, name in enumerate(["D22", "D24", "D26", "D28", "D30", "D32", "D34", "D36", "D38", "D40", "D42", "D44", "D46", "D48", "D50", "D52"])] + [ComponentPin(name, 11, i) for i, name in enumerate(["D23", "D25", "D27", "D29", "D31", "D33", "D35", "D37", "D39", "D41", "D43", "D45", "D47", "D49", "D51", "D53"])] + [ComponentPin(name, 16, 6 + i) for i, name in enumerate(["D0/RX0", "D1/TX0", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13"])] + [ComponentPin(name, 17, 6 + i) for i, name in enumerate(["D14/TX3", "D15/RX3", "D16/TX2", "D17/RX2", "D18/TX1", "D19/RX1", "D20/SDA", "D21/SCL"])]},
+    {"label": "Wemos LOLIN32 Lite", "name": "U", "type": "Wemos LOLIN32 Lite", "category": "Module", "value": "ESP32", "width": 8, "height": 13, "pins": _side_pins(["VP", "VN", "EN", "31*", "35*", "32", "33", "25", "26", "27", "14", "12", "G"], ["3V", "22", "19", "23", "18", "5", "17", "16", "4", "0", "2", "15", "13"], 8)},
+]
+
 
 
 class CompactTabWidget(QTabWidget):
@@ -86,6 +114,8 @@ class MainWindow(QMainWindow):
         self.autosave_path = Path.home() / ".perfboard_planner_recovery.json"
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
+        self.clipboard_items: list[dict] = []
+        self.clipboard_paste_count = 0
         self.max_pin_connections = 2
         self.count_pin_connections_both_sides = True
         self._building_inspector = False
@@ -247,6 +277,12 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
+    def _theme_icon(self, name: str, fallback: QStyle.StandardPixmap) -> QIcon:
+        icon = QIcon.fromTheme(name)
+        if icon.isNull():
+            icon = self.style().standardIcon(fallback)
+        return icon
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
         toolbar.setIconSize(QSize(20, 20))
@@ -254,17 +290,23 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
-        self.new_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon), "New", self); self.new_action.setShortcut(QKeySequence.StandardKey.New)
-        self.open_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Open", self); self.open_action.setShortcut(QKeySequence.StandardKey.Open)
-        self.save_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save", self); self.save_action.setShortcut(QKeySequence.StandardKey.Save)
-        self.save_as_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DriveFDIcon), "Save As", self)
+        self.new_action = QAction(self._theme_icon("document-new", QStyle.StandardPixmap.SP_FileIcon), "New", self); self.new_action.setShortcut(QKeySequence.StandardKey.New)
+        self.open_action = QAction(self._theme_icon("document-open", QStyle.StandardPixmap.SP_DialogOpenButton), "Open", self); self.open_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.save_action = QAction(self._theme_icon("document-save", QStyle.StandardPixmap.SP_DialogSaveButton), "Save", self); self.save_action.setShortcut(QKeySequence.StandardKey.Save)
+        self.save_as_action = QAction(self._theme_icon("document-save-as", QStyle.StandardPixmap.SP_DriveFDIcon), "Save As", self)
         for action in [self.new_action, self.open_action, self.save_action, self.save_as_action]:
             toolbar.addAction(action)
         toolbar.addSeparator()
 
-        self.undo_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack), "Undo", self); self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
-        self.redo_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward), "Redo", self); self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.undo_action = QAction(self._theme_icon("edit-undo", QStyle.StandardPixmap.SP_ArrowBack), "Undo", self); self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self.redo_action = QAction(self._theme_icon("edit-redo", QStyle.StandardPixmap.SP_ArrowForward), "Redo", self); self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         toolbar.addAction(self.undo_action); toolbar.addAction(self.redo_action)
+        toolbar.addSeparator()
+
+        self.copy_action = QAction(self._theme_icon("edit-copy", QStyle.StandardPixmap.SP_FileDialogNewFolder), "Copy", self); self.copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        self.paste_action = QAction(self._theme_icon("edit-paste", QStyle.StandardPixmap.SP_DialogOpenButton), "Paste", self); self.paste_action.setShortcut(QKeySequence.StandardKey.Paste)
+        self.duplicate_action = QAction(self._theme_icon("edit-duplicate", QStyle.StandardPixmap.SP_FileIcon), "Duplicate", self); self.duplicate_action.setShortcut(QKeySequence("Ctrl+D"))
+        toolbar.addAction(self.copy_action); toolbar.addAction(self.paste_action); toolbar.addAction(self.duplicate_action)
         toolbar.addSeparator()
 
         self.mode_group = QActionGroup(self)
@@ -285,7 +327,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         self.warnings_action = QAction(self._warning_icon("#94a3b8"), "Warnings", self)
-        self.bom_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "BOM", self)
+        self.bom_action = QAction(self._theme_icon("x-office-spreadsheet", QStyle.StandardPixmap.SP_FileDialogDetailedView), "BOM", self)
         toolbar.addAction(self.warnings_action); toolbar.addAction(self.bom_action)
 
     def _build_left_dock(self) -> None:
@@ -313,6 +355,12 @@ class MainWindow(QMainWindow):
         self.lock_button = QPushButton("Lock / unlock")
         row.addWidget(self.delete_button); row.addWidget(self.lock_button)
         objects_layout.addLayout(row)
+        clipboard_row = QHBoxLayout()
+        self.copy_button = QPushButton("Copy")
+        self.paste_button = QPushButton("Paste")
+        self.duplicate_button = QPushButton("Duplicate")
+        clipboard_row.addWidget(self.copy_button); clipboard_row.addWidget(self.paste_button); clipboard_row.addWidget(self.duplicate_button)
+        objects_layout.addLayout(clipboard_row)
         tabs.addTab(objects_tab, "Objects")
 
         # Groups / modules
@@ -359,8 +407,10 @@ class MainWindow(QMainWindow):
         library_tab = QWidget(); lib_layout = QVBoxLayout(library_tab)
         lib_layout.addWidget(QLabel("Quick footprints"))
         self.library_list = QListWidget()
-        for label in ["Resistor · 2-pin", "LED · 2-pin", "Diode · 2-pin", "DIP-8", "Pin header · 4", "Screw terminal · 2"]:
-            self.library_list.addItem(label)
+        for footprint in FOOTPRINT_LIBRARY:
+            item = QListWidgetItem(footprint["label"])
+            item.setData(Qt.ItemDataRole.UserRole, footprint)
+            self.library_list.addItem(item)
         lib_layout.addWidget(self.library_list)
         tabs.addTab(library_tab, "Library")
 
@@ -398,6 +448,9 @@ class MainWindow(QMainWindow):
         self.save_as_action.triggered.connect(self.save_file_as)
         self.undo_action.triggered.connect(self.undo)
         self.redo_action.triggered.connect(self.redo)
+        self.copy_action.triggered.connect(self.copy_selected)
+        self.paste_action.triggered.connect(self.paste_clipboard)
+        self.duplicate_action.triggered.connect(self.duplicate_selected)
         self.mode_group.triggered.connect(lambda action: self.set_tool(action.data()))
         self.front_side_action.triggered.connect(lambda: self.set_side("front"))
         self.back_side_action.triggered.connect(lambda: self.set_side("back"))
@@ -406,6 +459,7 @@ class MainWindow(QMainWindow):
         self.board.beforeLayoutChange.connect(self.push_undo)
         self.board.layoutChanged.connect(self._on_layout_changed)
         self.board.selectionChanged.connect(self.populate_inspector)
+        self.board.selectionChanged.connect(self._update_clipboard_actions)
         self.board.statusMessage.connect(self.statusBar().showMessage)
         self.board.toolRequested.connect(self.set_tool)
         self.board.zoomChanged.connect(self.update_zoom_label)
@@ -415,6 +469,9 @@ class MainWindow(QMainWindow):
         self.board.quickActionRequested.connect(self.handle_quick_action)
         self.delete_button.clicked.connect(self.safe_delete_selected)
         self.lock_button.clicked.connect(self.toggle_lock_selected)
+        self.copy_button.clicked.connect(self.copy_selected)
+        self.paste_button.clicked.connect(self.paste_clipboard)
+        self.duplicate_button.clicked.connect(self.duplicate_selected)
         self.object_tree.itemClicked.connect(self.select_from_object_tree)
         self.warning_list.itemClicked.connect(self.focus_warning_item)
         self.mute_warning_button.clicked.connect(self.mute_selected_warning)
@@ -510,6 +567,16 @@ class MainWindow(QMainWindow):
     def _update_undo_actions(self) -> None:
         self.undo_action.setEnabled(bool(self.undo_stack)); self.redo_action.setEnabled(bool(self.redo_stack))
 
+    def _update_clipboard_actions(self) -> None:
+        has_selection = bool(self.board.selected)
+        has_clipboard = bool(self.clipboard_items)
+        for widget_name in ("copy_action", "copy_button", "duplicate_action", "duplicate_button"):
+            if hasattr(self, widget_name):
+                getattr(self, widget_name).setEnabled(has_selection)
+        for widget_name in ("paste_action", "paste_button"):
+            if hasattr(self, widget_name):
+                getattr(self, widget_name).setEnabled(has_clipboard)
+
     def _update_window_title(self) -> None:
         name = self.current_path.name if self.current_path else (self.layout_model.project.title or "Untitled")
         dirty = " *" if self.is_dirty else ""
@@ -583,7 +650,7 @@ class MainWindow(QMainWindow):
         self._remember_selected_component_template()
         self._refresh_all()
 
-    def _refresh_all(self) -> None:
+    def _refresh_all(self, *, refresh_inspector: bool = True) -> None:
         self.board.pin_count_map = pin_connection_counts(self.layout_model, count_both_sides=self.count_pin_connections_both_sides)
         self._warnings = layout_warnings(self.layout_model, max_pin_connections=self.max_pin_connections, count_both_sides=self.count_pin_connections_both_sides)
         active_warnings = self.active_warnings()
@@ -597,8 +664,10 @@ class MainWindow(QMainWindow):
         self.populate_recent_parts()
         self.update_route_button()
         self.populate_bom()
-        self.populate_inspector()
+        if refresh_inspector:
+            self.populate_inspector()
         self._update_undo_actions()
+        self._update_clipboard_actions()
 
     def new_file(self) -> None:
         if not self.confirm_discard_unsaved():
@@ -669,6 +738,128 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
         self.board.delete_selected()
+
+    def _selected_items_for_clipboard(self) -> list[dict]:
+        items: list[dict] = []
+        for kind, idx in sorted(self.board.selected, key=lambda sel: (sel[0], sel[1])):
+            collection = self.board._collection(kind)
+            if collection is None or not (0 <= idx < len(collection)):
+                continue
+            items.append({"kind": kind, "item": copy.deepcopy(collection[idx])})
+        return items
+
+    def _clipboard_offset(self) -> tuple[int, int]:
+        step = max(1, self.clipboard_paste_count)
+        return step, step
+
+    @staticmethod
+    def _fit_axis_delta(values: list[int], preferred_delta: int, max_value: int) -> int:
+        if not values:
+            return preferred_delta
+        low = min(values)
+        high = max(values)
+        if 0 <= low + preferred_delta and high + preferred_delta <= max_value:
+            return preferred_delta
+        fallback_delta = -preferred_delta
+        if 0 <= low + fallback_delta and high + fallback_delta <= max_value:
+            return fallback_delta
+        return max(-low, min(preferred_delta, max_value - high))
+
+    def _fit_delta_to_board(self, item_data: list[dict], dr: int, dc: int) -> tuple[int, int]:
+        rows: list[int] = []
+        cols: list[int] = []
+        for entry in item_data:
+            kind = entry["kind"]
+            item = entry["item"]
+            if kind in {"component", "via", "annotation"}:
+                rows.append(int(item.row)); cols.append(int(item.col))
+            elif kind == "wire":
+                rows.extend(int(r) for r, _ in item.points)
+                cols.extend(int(c) for _, c in item.points)
+            elif kind == "keepout":
+                rows.extend([int(item.row1), int(item.row2)])
+                cols.extend([int(item.col1), int(item.col2)])
+        return (
+            self._fit_axis_delta(rows, dr, self.layout_model.rows - 1),
+            self._fit_axis_delta(cols, dc, self.layout_model.cols - 1),
+        )
+
+    def _prepare_pasted_item(self, kind: str, item, dr: int, dc: int):
+        pasted = copy.deepcopy(item)
+        if hasattr(pasted, "locked"):
+            pasted.locked = False
+        if hasattr(pasted, "group"):
+            pasted.group = ""
+        if kind == "component":
+            pasted.name = self.board._next_component_name(pasted.name, pasted.component_type)
+            pasted.row = max(0, min(self.layout_model.rows - 1, int(pasted.row) + dr))
+            pasted.col = max(0, min(self.layout_model.cols - 1, int(pasted.col) + dc))
+        elif kind == "wire":
+            pasted.points = [
+                (
+                    max(0, min(self.layout_model.rows - 1, int(r) + dr)),
+                    max(0, min(self.layout_model.cols - 1, int(c) + dc)),
+                )
+                for r, c in pasted.points
+            ]
+        elif kind in {"via", "annotation"}:
+            pasted.row = max(0, min(self.layout_model.rows - 1, int(pasted.row) + dr))
+            pasted.col = max(0, min(self.layout_model.cols - 1, int(pasted.col) + dc))
+        elif kind == "keepout":
+            pasted.row1 = max(0, min(self.layout_model.rows - 1, int(pasted.row1) + dr))
+            pasted.row2 = max(0, min(self.layout_model.rows - 1, int(pasted.row2) + dr))
+            pasted.col1 = max(0, min(self.layout_model.cols - 1, int(pasted.col1) + dc))
+            pasted.col2 = max(0, min(self.layout_model.cols - 1, int(pasted.col2) + dc))
+        return pasted
+
+    def _paste_items(self, item_data: list[dict], label: str) -> None:
+        if not item_data:
+            return
+        dr, dc = self._clipboard_offset()
+        dr, dc = self._fit_delta_to_board(item_data, dr, dc)
+        self.push_undo(label)
+        new_selection: set[Selection] = set()
+        for entry in item_data:
+            kind = entry["kind"]
+            collection = self.board._collection(kind)
+            if collection is None:
+                continue
+            pasted = self._prepare_pasted_item(kind, entry["item"], dr, dc)
+            collection.append(pasted)
+            new_selection.add((kind, len(collection) - 1))
+        self.board.selected = new_selection
+        self.clipboard_paste_count += 1
+        self._set_dirty(True)
+        self._refresh_all()
+        self.board.selectionChanged.emit()
+        self.board.update()
+        self.statusBar().showMessage(f"{label}: {len(new_selection)} item{'s' if len(new_selection) != 1 else ''}.")
+
+    def copy_selected(self) -> None:
+        self.clipboard_items = self._selected_items_for_clipboard()
+        self.clipboard_paste_count = 1
+        count = len(self.clipboard_items)
+        self._update_clipboard_actions()
+        if count:
+            self.statusBar().showMessage(f"Copied {count} item{'s' if count != 1 else ''}.")
+        else:
+            self.statusBar().showMessage("Nothing selected to copy.")
+
+    def paste_clipboard(self) -> None:
+        if not self.clipboard_items:
+            self.statusBar().showMessage("Clipboard is empty.")
+            return
+        self._paste_items(self.clipboard_items, "Paste")
+
+    def duplicate_selected(self) -> None:
+        items = self._selected_items_for_clipboard()
+        if not items:
+            self.statusBar().showMessage("Nothing selected to duplicate.")
+            return
+        previous_count = self.clipboard_paste_count
+        self.clipboard_paste_count = 1
+        self._paste_items(items, "Duplicate")
+        self.clipboard_paste_count = previous_count
 
     def handle_quick_action(self, action: str) -> None:
         if len(self.board.selected) != 1:
@@ -1162,13 +1353,43 @@ class MainWindow(QMainWindow):
         w.currentTextChanged.connect(changed)
         return w
 
+    @staticmethod
+    def _opposite_side(side: str) -> str:
+        if side == "front":
+            return "back"
+        if side == "back":
+            return "front"
+        return side
+
+    def _project_text_area(self, value: str, changed, *, minimum_height: int = 70) -> QTextEdit:
+        editor = QTextEdit(value)
+        editor.setMinimumHeight(minimum_height)
+
+        def apply_text() -> None:
+            changed(editor.toPlainText())
+            self._set_dirty(True)
+
+        editor.textChanged.connect(apply_text)
+        return editor
+
     def _color_button(self, value: str, changed) -> QPushButton:
-        btn = QPushButton(value)
-        btn.setStyleSheet(f"background:{value}; color:{'#fff' if QColor(value).lightness()<120 else '#111'}; border-radius:8px; padding:8px;")
+        btn = QPushButton()
+        current_color = {"value": value or "#d00000"}
+
+        def apply_style(color_text: str) -> None:
+            qcolor = QColor(color_text or "#d00000")
+            fg = "#fff" if qcolor.lightness() < 120 else "#111"
+            btn.setText(color_text)
+            btn.setStyleSheet(f"background:{color_text}; color:{fg}; border-radius:8px; padding:8px;")
+
         def choose():
-            color = QColorDialog.getColor(QColor(value), self, "Choose color")
+            color = QColorDialog.getColor(QColor(current_color["value"]), self, "Choose color")
             if color.isValid():
-                changed(color.name())
+                current_color["value"] = color.name()
+                apply_style(current_color["value"])
+                changed(current_color["value"])
+
+        apply_style(current_color["value"])
         btn.clicked.connect(choose)
         return btn
 
@@ -1183,6 +1404,10 @@ class MainWindow(QMainWindow):
     def _set_current_wire_color(self, color: str) -> None:
         self.board.current_wire_color = color
         self.update_route_button()
+        self.board.update()
+
+    def _set_current_keepout_color(self, color: str) -> None:
+        self.board.current_keepout_color = color
         self.board.update()
 
     def update_route_button(self) -> None:
@@ -1203,6 +1428,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(5)
         current = QPushButton(value)
         current.setMinimumWidth(86)
+        current_color = {"value": value or "#d00000"}
 
         def apply_style(color_text: str) -> None:
             qcolor = QColor(color_text or "#d00000")
@@ -1213,13 +1439,14 @@ class MainWindow(QMainWindow):
         def apply_color(color_text: str) -> None:
             if not color_text:
                 return
-            apply_style(color_text)
-            changed(color_text)
+            current_color["value"] = color_text
+            apply_style(current_color["value"])
+            changed(current_color["value"])
             self.populate_wire_colors()
             self.update_route_button()
             self.board.update()
 
-        apply_style(value)
+        apply_style(current_color["value"])
         current.clicked.connect(lambda: choose_custom())
         layout.addWidget(current)
 
@@ -1241,7 +1468,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(more)
 
         def choose_custom() -> None:
-            color = QColorDialog.getColor(QColor(value), self, "Choose wire color")
+            color = QColorDialog.getColor(QColor(current_color["value"]), self, "Choose wire color")
             if color.isValid():
                 apply_color(color.name())
 
@@ -1249,11 +1476,63 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _apply_change(self, label: str, fn) -> None:
+    def _apply_change(self, label: str, fn, *, refresh_inspector: bool = False) -> None:
         self.push_undo(label)
         fn()
         self._set_dirty(True)
-        self._refresh_all()
+        self._refresh_all(refresh_inspector=refresh_inspector)
+
+    def _set_board_value(self, attr: str, value: int) -> None:
+        limits = {"rows": (1, 500), "cols": (1, 500), "spacing": (8, 80)}
+        lo, hi = limits[attr]
+        value = max(lo, min(hi, int(value)))
+        if getattr(self.layout_model, attr) == value:
+            return
+        self._apply_change("Edit board", lambda: setattr(self.layout_model, attr, value))
+
+    def swap_component_sides(self) -> None:
+        if not self.layout_model.components:
+            self.statusBar().showMessage("No components to swap.")
+            return
+
+        def do() -> None:
+            for component in self.layout_model.components:
+                component.side = self._opposite_side(component.side)
+
+        self._apply_change("Swap component sides", do, refresh_inspector=True)
+        self.statusBar().showMessage("Swapped all components front ↔ back.")
+
+    def swap_all_sided_items(self) -> None:
+        def do() -> None:
+            for collection in (self.layout_model.components, self.layout_model.wires, self.layout_model.annotations):
+                for item in collection:
+                    item.side = self._opposite_side(item.side)
+            for keepout in self.layout_model.keepouts:
+                keepout.side = self._opposite_side(keepout.side)
+
+        self._apply_change("Swap all sides", do, refresh_inspector=True)
+        self.statusBar().showMessage("Swapped all front/back sided items. Vias stay through-board.")
+
+    def _edit_template(self, attr: str, value) -> None:
+        setattr(self.board.new_component_template, attr, value)
+        self.board.update()
+
+    def _set_template_size(self, attr: str, value: int) -> None:
+        setattr(self.board.new_component_template, attr, max(1, int(value)))
+        self.board.update()
+
+    def rotate_template_footprint(self) -> None:
+        rotate_component_footprint_90(self.board.new_component_template)
+        self.board.update()
+        self.populate_inspector()
+
+    def rotate_component_footprint(self, component: Component) -> None:
+        def do() -> None:
+            rotate_component_footprint_90(component)
+            component.row = max(0, min(self.layout_model.rows - component.height, component.row))
+            component.col = max(0, min(self.layout_model.cols - component.width, component.col))
+
+        self._apply_change("Rotate component footprint", do, refresh_inspector=True)
 
     def _inspect_project_and_tools(self) -> None:
         # The inspector is contextual. Project settings are only shown in the
@@ -1265,8 +1544,21 @@ class MainWindow(QMainWindow):
             form.addRow("Title", self._line(p.title, lambda v: self._apply_change("Edit title", lambda: setattr(p, "title", v))))
             form.addRow("Author", self._line(p.author, lambda v: self._apply_change("Edit author", lambda: setattr(p, "author", v))))
             form.addRow("Revision", self._line(p.revision, lambda v: self._apply_change("Edit revision", lambda: setattr(p, "revision", v))))
-            notes = QTextEdit(p.notes); notes.setMinimumHeight(70); notes.textChanged.connect(lambda: setattr(p, "notes", notes.toPlainText()))
-            form.addRow("Notes", notes)
+            form.addRow("Notes", self._project_text_area(p.notes, lambda v: setattr(p, "notes", v)))
+            form.addRow("Todo", self._project_text_area(p.todo, lambda v: setattr(p, "todo", v), minimum_height=60))
+            form.addRow("Changelog", self._project_text_area(p.changelog, lambda v: setattr(p, "changelog", v), minimum_height=60))
+
+            _, board_form = self._card("Board")
+            board_form.addRow("Rows", self._spin(self.layout_model.rows, 1, 500, lambda v: self._set_board_value("rows", v)))
+            board_form.addRow("Columns", self._spin(self.layout_model.cols, 1, 500, lambda v: self._set_board_value("cols", v)))
+            board_form.addRow("Spacing", self._spin(self.layout_model.spacing, 8, 80, lambda v: self._set_board_value("spacing", v)))
+            swap_components = QPushButton("Swap all components front ↔ back")
+            swap_components.clicked.connect(self.swap_component_sides)
+            board_form.addRow(swap_components)
+            swap_all = QPushButton("Swap all sided items front ↔ back")
+            swap_all.setToolTip("Swaps components, wires, notes, and front/back keepouts. Vias stay through-board.")
+            swap_all.clicked.connect(self.swap_all_sided_items)
+            board_form.addRow(swap_all)
 
             _, view = self._card("View")
             cb_names = QCheckBox("Show component names"); cb_names.setChecked(self.board.show_component_names); cb_names.toggled.connect(lambda v: setattr(self.board, "show_component_names", v) or self.board.update())
@@ -1312,14 +1604,17 @@ class MainWindow(QMainWindow):
     def _inspect_new_component_template(self) -> None:
         _, newpart = self._card("Part mode · new component")
         t = self.board.new_component_template
-        newpart.addRow("Name", self._line(t.name, lambda v: setattr(t, "name", v)))
-        newpart.addRow("Value", self._line(t.value, lambda v: setattr(t, "value", v)))
-        newpart.addRow("Type", self._line(t.component_type, lambda v: setattr(t, "component_type", v)))
-        newpart.addRow("Category", self._combo(t.category, ["Passive", "Semiconductor", "IC", "Connector", "Module", "Custom"], lambda v: setattr(t, "category", v)))
-        newpart.addRow("Width", self._spin(t.width, 1, 100, lambda v: setattr(t, "width", v)))
-        newpart.addRow("Height", self._spin(t.height, 1, 100, lambda v: setattr(t, "height", v)))
-        newpart.addRow("Body angle", self._spin(t.rotation, 0, 359, lambda v: setattr(t, "rotation", v)))
-        newpart.addRow("Color", self._color_button(t.color, lambda v: setattr(t, "color", v)))
+        newpart.addRow("Name", self._line(t.name, lambda v: self._edit_template("name", v)))
+        newpart.addRow("Value", self._line(t.value, lambda v: self._edit_template("value", v)))
+        newpart.addRow("Type", self._line(t.component_type, lambda v: self._edit_template("component_type", v)))
+        newpart.addRow("Category", self._combo(t.category, ["Passive", "Semiconductor", "IC", "Connector", "Module", "Custom"], lambda v: self._edit_template("category", v)))
+        newpart.addRow("Width", self._spin(t.width, 1, 100, lambda v: self._set_template_size("width", v)))
+        newpart.addRow("Height", self._spin(t.height, 1, 100, lambda v: self._set_template_size("height", v)))
+        newpart.addRow("Body angle (visual)", self._spin(t.rotation, 0, 359, lambda v: self._edit_template("rotation", v)))
+        newpart.addRow("Color", self._color_button(t.color, lambda v: self._edit_template("color", v)))
+        rotate_btn = QPushButton("Rotate footprint 90°")
+        rotate_btn.clicked.connect(self.rotate_template_footprint)
+        newpart.addRow(rotate_btn)
         pins_btn = QPushButton("Edit template pins")
         pins_btn.clicked.connect(lambda: self.edit_component_pins(t, is_template=True))
         newpart.addRow(pins_btn)
@@ -1334,7 +1629,7 @@ class MainWindow(QMainWindow):
 
     def _inspect_new_keepout_tool(self) -> None:
         _, keepout = self._card("Keepout mode")
-        keepout.addRow("Color", self._color_button(self.board.current_keepout_color, lambda v: setattr(self.board, "current_keepout_color", v)))
+        keepout.addRow("Color", self._color_button(self.board.current_keepout_color, self._set_current_keepout_color))
         hint = QLabel("Click two opposite corners to create a mechanical no-go area. Visibility is controlled from Select mode → View.")
         hint.setObjectName("MutedLabel")
         hint.setWordWrap(True)
@@ -1358,7 +1653,10 @@ class MainWindow(QMainWindow):
         form.addRow("Column", self._spin(comp.col + 1, 1, self.layout_model.cols, lambda v: self._apply_change("Move component", lambda: setattr(comp, "col", v-1))))
         form.addRow("Width", self._spin(comp.width, 1, 100, lambda v: self._apply_change("Resize component", lambda: setattr(comp, "width", v))))
         form.addRow("Height", self._spin(comp.height, 1, 100, lambda v: self._apply_change("Resize component", lambda: setattr(comp, "height", v))))
-        form.addRow("Body angle", self._spin(comp.rotation, 0, 359, lambda v: self._apply_change("Rotate component", lambda: setattr(comp, "rotation", v))))
+        form.addRow("Body angle (visual)", self._spin(comp.rotation, 0, 359, lambda v: self._apply_change("Rotate component body", lambda: setattr(comp, "rotation", v))))
+        footprint_btn = QPushButton("Rotate footprint 90°")
+        footprint_btn.clicked.connect(lambda: self.rotate_component_footprint(comp))
+        form.addRow(footprint_btn)
         form.addRow("Color", self._color_button(comp.color, lambda v: self._apply_change("Color component", lambda: setattr(comp, "color", v))))
         show_name = QCheckBox("Show this component name"); show_name.setChecked(comp.show_name); show_name.toggled.connect(lambda v: self._apply_change("Toggle name", lambda: setattr(comp, "show_name", bool(v))))
         show_pins = QCheckBox("Show this component's pin names"); show_pins.setChecked(comp.show_pin_names); show_pins.toggled.connect(lambda v: self._apply_change("Toggle pins", lambda: setattr(comp, "show_pin_names", bool(v))))
@@ -1502,21 +1800,26 @@ class MainWindow(QMainWindow):
             self._refresh_all()
 
     def apply_library_preset(self, item: QListWidgetItem) -> None:
-        text = item.text()
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
         t = self.board.new_component_template
-        if "DIP-8" in text:
-            t.name = "U"; t.component_type = "DIP-8"; t.category = "IC"; t.width = 4; t.height = 4
-            t.pins = [ComponentPin(f"P{i+1}", i, -1) for i in range(4)] + [ComponentPin(f"P{i+5}", 3-i, 4) for i in range(4)]
-        elif "Pin header" in text:
-            t.name = "J"; t.component_type = "pin header"; t.category = "Connector"; t.width = 1; t.height = 4; t.pins = [ComponentPin(f"P{i+1}", i, 0) for i in range(4)]
-        elif "Screw" in text:
-            t.name = "J"; t.component_type = "screw terminal"; t.category = "Connector"; t.width = 2; t.height = 1; t.pins = [ComponentPin("P1", 0, 0), ComponentPin("P2", 0, 1)]
-        else:
-            t.name = "R" if "Resistor" in text else "D" if "Diode" in text else "LED" if "LED" in text else "Part"
-            t.component_type = text.split(" · ")[0].lower(); t.category = "Passive" if "Resistor" in text else "Semiconductor"
-            t.width = 3; t.height = 1; t.pins = [ComponentPin("P1", 0, 0), ComponentPin("P2", 0, 2)]
-        self.set_tool("component"); self.populate_inspector()
-        self.statusBar().showMessage(f"Loaded template: {text}")
+        t.name = str(data.get("name", "Part"))
+        t.component_type = str(data.get("type", "generic"))
+        t.category = str(data.get("category", "Custom"))
+        t.value = str(data.get("value", ""))
+        t.width = int(data.get("width", 1))
+        t.height = int(data.get("height", 1))
+        t.color = str(data.get("color", "#ffcc66"))
+        t.rotation = int(data.get("rotation", 0))
+        t.orientation_note = str(data.get("orientation_note", ""))
+        t.show_name = bool(data.get("show_name", True))
+        t.show_pin_names = bool(data.get("show_pin_names", True))
+        t.pins = [ComponentPin(pin.name, pin.row, pin.col) for pin in data.get("pins", [])]
+        t.jumpers = [ComponentJumper(j.pin_a, j.pin_b, j.color) for j in data.get("jumpers", [])]
+        self.set_tool("component")
+        self.populate_inspector()
+        self.statusBar().showMessage(f"Loaded template: {data.get('label', item.text())}")
 
     def optimize_wire_routes(self, scope: str, allow_cross_side: bool) -> None:
         before = layout_to_dict(self.layout_model)
@@ -1643,8 +1946,12 @@ class PinEditorDialog(QDialog):
         self.grid_frame.setObjectName("PinGridFrame")
         self.grid_layout = QGridLayout(self.grid_frame)
         self.grid_layout.setContentsMargins(10, 10, 10, 10)
-        self.grid_layout.setSpacing(6)
-        body.addWidget(self.grid_frame, 1)
+        self.grid_layout.setSpacing(5)
+        self.grid_scroll = QScrollArea()
+        self.grid_scroll.setWidgetResizable(False)
+        self.grid_scroll.setWidget(self.grid_frame)
+        self.grid_scroll.setMinimumWidth(420)
+        body.addWidget(self.grid_scroll, 1)
 
         side = QVBoxLayout()
         body.addLayout(side)
@@ -1708,8 +2015,22 @@ class PinEditorDialog(QDialog):
         self.refresh()
 
     def _range(self) -> tuple[range, range]:
-        pad = 2
-        return range(-pad, self.height + pad), range(-pad, self.width + pad)
+        pad = 1 if max(self.width, self.height) > 12 else 2
+        pin_rows = [pin.row for pin in self.pins]
+        pin_cols = [pin.col for pin in self.pins]
+        min_row = min([-pad, *pin_rows])
+        max_row = max([self.height + pad - 1, *pin_rows])
+        min_col = min([-pad, *pin_cols])
+        max_col = max([self.width + pad - 1, *pin_cols])
+        return range(min_row, max_row + 1), range(min_col, max_col + 1)
+
+    @staticmethod
+    def _pin_button_text(pin: ComponentPin | None) -> str:
+        if pin is None:
+            return "•"
+        if len(pin.name) <= 5:
+            return pin.name
+        return pin.name[:4] + "…"
 
     def pin_at(self, row: int, col: int) -> Optional[ComponentPin]:
         return next((p for p in self.pins if p.row == row and p.col == col), None)
@@ -1730,18 +2051,21 @@ class PinEditorDialog(QDialog):
             lbl = QLabel(str(col))
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setObjectName("PinGridCoord")
+            lbl.setFixedSize(QSize(44, 22))
             self.grid_layout.addWidget(lbl, 0, gc)
         for gr, row in enumerate(rows, start=1):
             lbl = QLabel(str(row))
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setObjectName("PinGridCoord")
+            lbl.setFixedSize(QSize(34, 36))
             self.grid_layout.addWidget(lbl, gr, 0)
             for gc, col in enumerate(cols, start=1):
                 pin = self.pin_at(row, col)
                 btn = QToolButton()
-                btn.setMinimumSize(38, 34)
-                btn.setToolTip(f"Relative row {row}, col {col}")
-                btn.setText(pin.name if pin else "•")
+                btn.setFixedSize(QSize(44, 36))
+                label = f"{pin.name} · " if pin else ""
+                btn.setToolTip(f"{label}relative row {row}, col {col}")
+                btn.setText(self._pin_button_text(pin))
                 inside = 0 <= row < self.height and 0 <= col < self.width
                 if pin:
                     selected = pin.name == self.selected_pin_name

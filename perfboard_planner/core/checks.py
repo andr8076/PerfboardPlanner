@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from .geometry import board_contains, component_pin_absolute, point_in_rect
-from .models import Component, KeepoutZone, Layout, Via, Wire
+from .models import Component, Layout, Via, Wire
 
 GridPoint = Tuple[int, int]
 
