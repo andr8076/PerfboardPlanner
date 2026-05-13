@@ -2170,10 +2170,11 @@ class PinEditorDialog(QDialog):
         self.grid_frame.setMaximumSize(16_777_215, 16_777_215)
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
-            if item.widget():
-                item.widget().hide()
-                item.widget().setParent(None)
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
         rows, cols = self._range()
         row_count = len(rows)
         col_count = len(cols)
