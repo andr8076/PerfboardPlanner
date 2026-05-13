@@ -6,10 +6,12 @@ A desktop app for planning circuit layouts on perfboards. It helps you place com
 
 **Layout & Design**
 - Drag and drop components on a grid
-- Rotate and flip components to the other side
+- Rotate component footprints with pins, or visually angle component bodies
+- Flip components to the other side
 - Place vias, traces, and keepout zones
 - Auto-numbering for components (R1, R2, U1, etc.)
 - See a live preview before you place something
+- Copy, paste, and duplicate selected items with standard shortcuts
 
 **Routing & Connections**
 - Auto-route traces between component pins
