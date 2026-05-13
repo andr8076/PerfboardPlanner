@@ -2042,6 +2042,7 @@ class PinEditorDialog(QDialog):
         self.width = component.width
         self.height = component.height
         self.selected_pin_name: str = self.pins[0].name if self.pins else ""
+        self.grid_buttons: dict[tuple[int, int], QToolButton] = {}
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Click cells to add/select component attachment pins. Yellow cells are the visible component body; outer cells are external lead positions."))
@@ -2157,6 +2158,34 @@ class PinEditorDialog(QDialog):
     def _header_size(cell_size: QSize, *, row_header: bool) -> QSize:
         return QSize(max(30, cell_size.width() - 8), cell_size.height()) if row_header else QSize(cell_size.width(), 22)
 
+    def _style_pin_button(self, btn: QToolButton, row: int, col: int, cell_size: QSize, max_pin_chars: int) -> None:
+        pin = self.pin_at(row, col)
+        label = f"{pin.name} · " if pin else ""
+        btn.setToolTip(f"{label}relative row {row}, col {col}")
+        btn.setText(self._pin_button_text(pin, max_pin_chars))
+        inside = 0 <= row < self.height and 0 <= col < self.width
+        if pin:
+            selected = pin.name == self.selected_pin_name
+            bg = "#111827" if selected else "#f8fafc"
+            fg = "#ffffff" if selected else "#111827"
+            border = "#2457d6" if selected else "#111827"
+            btn.setStyleSheet(f"QToolButton {{background: {bg}; color: {fg}; border: 2px solid {border}; border-radius: 7px; font-weight: 800; padding: 0;}}")
+        elif inside:
+            btn.setStyleSheet("QToolButton {background: #ffe59a; color: #475569; border: 1px solid #f5c542; border-radius: 7px; padding: 0;} QToolButton:hover {border-color: #2457d6;}")
+        else:
+            btn.setStyleSheet("QToolButton {background: #eef2f7; color: #64748b; border: 1px solid #cbd5e1; border-radius: 7px; padding: 0;} QToolButton:hover {border-color: #2457d6;}")
+
+    def refresh_grid_styles(self) -> None:
+        rows, cols = self._range()
+        expected_keys = {(row, col) for row in rows for col in cols}
+        if set(self.grid_buttons) != expected_keys:
+            self.refresh_grid()
+            return
+        cell_size = self._grid_cell_size(len(rows), len(cols))
+        max_pin_chars = 5 if cell_size.width() >= 38 else 3
+        for (row, col), btn in self.grid_buttons.items():
+            self._style_pin_button(btn, row, col, cell_size, max_pin_chars)
+
     def pin_at(self, row: int, col: int) -> Optional[ComponentPin]:
         return next((p for p in self.pins if p.row == row and p.col == col), None)
 
@@ -2175,6 +2204,7 @@ class PinEditorDialog(QDialog):
                 widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
+        self.grid_buttons.clear()
         rows, cols = self._range()
         row_count = len(rows)
         col_count = len(cols)
@@ -2196,25 +2226,12 @@ class PinEditorDialog(QDialog):
             lbl.setFixedSize(self._header_size(cell_size, row_header=True))
             self.grid_layout.addWidget(lbl, gr, 0)
             for gc, col in enumerate(cols, start=1):
-                pin = self.pin_at(row, col)
                 btn = QToolButton()
                 btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
                 btn.setFixedSize(cell_size)
-                label = f"{pin.name} · " if pin else ""
-                btn.setToolTip(f"{label}relative row {row}, col {col}")
-                btn.setText(self._pin_button_text(pin, max_pin_chars))
-                inside = 0 <= row < self.height and 0 <= col < self.width
-                if pin:
-                    selected = pin.name == self.selected_pin_name
-                    bg = "#111827" if selected else "#f8fafc"
-                    fg = "#ffffff" if selected else "#111827"
-                    border = "#2457d6" if selected else "#111827"
-                    btn.setStyleSheet(f"QToolButton {{background: {bg}; color: {fg}; border: 2px solid {border}; border-radius: 7px; font-weight: 800; padding: 0;}}")
-                elif inside:
-                    btn.setStyleSheet("QToolButton {background: #ffe59a; color: #475569; border: 1px solid #f5c542; border-radius: 7px; padding: 0;} QToolButton:hover {border-color: #2457d6;}")
-                else:
-                    btn.setStyleSheet("QToolButton {background: #eef2f7; color: #64748b; border: 1px solid #cbd5e1; border-radius: 7px; padding: 0;} QToolButton:hover {border-color: #2457d6;}")
+                self._style_pin_button(btn, row, col, cell_size, max_pin_chars)
                 btn.clicked.connect(lambda checked=False, r=row, c=col: self.toggle_pin_cell(r, c))
+                self.grid_buttons[(row, col)] = btn
                 self.grid_layout.addWidget(btn, gr, gc)
         self.grid_frame.adjustSize()
         self.grid_frame.setFixedSize(self.grid_frame.sizeHint())
@@ -2249,7 +2266,7 @@ class PinEditorDialog(QDialog):
         name = item.data(Qt.ItemDataRole.UserRole)
         if name:
             self.selected_pin_name = name
-            self.refresh_grid()
+            self.refresh_grid_styles()
 
     def _next_pin_name(self) -> str:
         used = {p.name for p in self.pins}
@@ -2262,10 +2279,12 @@ class PinEditorDialog(QDialog):
         pin = self.pin_at(row, col)
         if pin:
             self.selected_pin_name = pin.name
-        else:
-            pin = ComponentPin(self._next_pin_name(), row, col)
-            self.pins.append(pin)
-            self.selected_pin_name = pin.name
+            self.refresh_pin_list()
+            self.refresh_grid_styles()
+            return
+        pin = ComponentPin(self._next_pin_name(), row, col)
+        self.pins.append(pin)
+        self.selected_pin_name = pin.name
         self.refresh()
 
     def rename_selected_pin(self) -> None:
