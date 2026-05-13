@@ -1353,14 +1353,6 @@ class MainWindow(QMainWindow):
         w.currentTextChanged.connect(changed)
         return w
 
-    @staticmethod
-    def _opposite_side(side: str) -> str:
-        if side == "front":
-            return "back"
-        if side == "back":
-            return "front"
-        return side
-
     def _project_text_area(self, value: str, changed, *, minimum_height: int = 70) -> QTextEdit:
         editor = QTextEdit(value)
         editor.setMinimumHeight(minimum_height)
@@ -1512,6 +1504,26 @@ class MainWindow(QMainWindow):
 
         self._apply_change("Swap all sides", do, refresh_inspector=True)
         self.statusBar().showMessage("Swapped all front/back sided items. Vias stay through-board.")
+    def _edit_template(self, attr: str, value) -> None:
+        setattr(self.board.new_component_template, attr, value)
+        self.board.update()
+
+    def _set_template_size(self, attr: str, value: int) -> None:
+        setattr(self.board.new_component_template, attr, max(1, int(value)))
+        self.board.update()
+
+    def rotate_template_footprint(self) -> None:
+        rotate_component_footprint_90(self.board.new_component_template)
+        self.board.update()
+        self.populate_inspector()
+
+    def rotate_component_footprint(self, component: Component) -> None:
+        def do() -> None:
+            rotate_component_footprint_90(component)
+            component.row = max(0, min(self.layout_model.rows - component.height, component.row))
+            component.col = max(0, min(self.layout_model.cols - component.width, component.col))
+
+        self._apply_change("Rotate component footprint", do, refresh_inspector=True)
 
     def _edit_template(self, attr: str, value) -> None:
         setattr(self.board.new_component_template, attr, value)
@@ -1547,18 +1559,6 @@ class MainWindow(QMainWindow):
             form.addRow("Notes", self._project_text_area(p.notes, lambda v: setattr(p, "notes", v)))
             form.addRow("Todo", self._project_text_area(p.todo, lambda v: setattr(p, "todo", v), minimum_height=60))
             form.addRow("Changelog", self._project_text_area(p.changelog, lambda v: setattr(p, "changelog", v), minimum_height=60))
-
-            _, board_form = self._card("Board")
-            board_form.addRow("Rows", self._spin(self.layout_model.rows, 1, 500, lambda v: self._set_board_value("rows", v)))
-            board_form.addRow("Columns", self._spin(self.layout_model.cols, 1, 500, lambda v: self._set_board_value("cols", v)))
-            board_form.addRow("Spacing", self._spin(self.layout_model.spacing, 8, 80, lambda v: self._set_board_value("spacing", v)))
-            swap_components = QPushButton("Swap all components front ↔ back")
-            swap_components.clicked.connect(self.swap_component_sides)
-            board_form.addRow(swap_components)
-            swap_all = QPushButton("Swap all sided items front ↔ back")
-            swap_all.setToolTip("Swaps components, wires, notes, and front/back keepouts. Vias stay through-board.")
-            swap_all.clicked.connect(self.swap_all_sided_items)
-            board_form.addRow(swap_all)
 
             _, view = self._card("View")
             cb_names = QCheckBox("Show component names"); cb_names.setChecked(self.board.show_component_names); cb_names.toggled.connect(lambda v: setattr(self.board, "show_component_names", v) or self.board.update())
