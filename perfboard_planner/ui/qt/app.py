@@ -2233,8 +2233,18 @@ class PinEditorDialog(QDialog):
                 btn.clicked.connect(lambda checked=False, r=row, c=col: self.toggle_pin_cell(r, c))
                 self.grid_buttons[(row, col)] = btn
                 self.grid_layout.addWidget(btn, gr, gc)
-        self.grid_frame.adjustSize()
-        self.grid_frame.setFixedSize(self.grid_frame.sizeHint())
+        # Do not rely on QWidget.sizeHint() here. On some Qt/macOS builds it can
+        # report a stale/tiny value immediately after the grid has been rebuilt,
+        # which makes the scroll-area child collapse after clicking a pin cell.
+        self.grid_layout.activate()
+        margins = self.grid_layout.contentsMargins()
+        spacing = max(0, self.grid_layout.spacing())
+        row_header = self._header_size(cell_size, row_header=True)
+        col_header = self._header_size(cell_size, row_header=False)
+        grid_w = margins.left() + margins.right() + row_header.width() + col_count * cell_size.width() + col_count * spacing
+        grid_h = margins.top() + margins.bottom() + col_header.height() + row_count * cell_size.height() + row_count * spacing
+        self.grid_frame.setFixedSize(grid_w, grid_h)
+        self.grid_frame.updateGeometry()
 
     def refresh_pin_list(self) -> None:
         self.pin_list.blockSignals(True)
@@ -2285,7 +2295,12 @@ class PinEditorDialog(QDialog):
         pin = ComponentPin(self._next_pin_name(), row, col)
         self.pins.append(pin)
         self.selected_pin_name = pin.name
-        self.refresh()
+        # The clicked cell is already inside the currently visible range, so the
+        # grid does not need to be destroyed and rebuilt. Refreshing only the
+        # list/combos and button styles keeps the editor stable while editing.
+        self.refresh_pin_list()
+        self.refresh_jumpers()
+        self.refresh_grid_styles()
 
     def rename_selected_pin(self) -> None:
         pin = next((p for p in self.pins if p.name == self.selected_pin_name), None)
