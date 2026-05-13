@@ -1459,6 +1459,27 @@ class MainWindow(QMainWindow):
 
         self._apply_change("Rotate component footprint", do, refresh_inspector=True)
 
+    def _edit_template(self, attr: str, value) -> None:
+        setattr(self.board.new_component_template, attr, value)
+        self.board.update()
+
+    def _set_template_size(self, attr: str, value: int) -> None:
+        setattr(self.board.new_component_template, attr, max(1, int(value)))
+        self.board.update()
+
+    def rotate_template_footprint(self) -> None:
+        rotate_component_footprint_90(self.board.new_component_template)
+        self.board.update()
+        self.populate_inspector()
+
+    def rotate_component_footprint(self, component: Component) -> None:
+        def do() -> None:
+            rotate_component_footprint_90(component)
+            component.row = max(0, min(self.layout_model.rows - component.height, component.row))
+            component.col = max(0, min(self.layout_model.cols - component.width, component.col))
+
+        self._apply_change("Rotate component footprint", do)
+
     def _inspect_project_and_tools(self) -> None:
         # The inspector is contextual. Project settings are only shown in the
         # neutral Select mode with nothing selected. Tool-specific setup appears
