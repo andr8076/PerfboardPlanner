@@ -1316,6 +1316,17 @@ class MainWindow(QMainWindow):
         w.currentTextChanged.connect(changed)
         return w
 
+    def _project_text_area(self, value: str, changed, *, minimum_height: int = 70) -> QTextEdit:
+        editor = QTextEdit(value)
+        editor.setMinimumHeight(minimum_height)
+
+        def apply_text() -> None:
+            changed(editor.toPlainText())
+            self._set_dirty(True)
+
+        editor.textChanged.connect(apply_text)
+        return editor
+
     def _color_button(self, value: str, changed) -> QPushButton:
         btn = QPushButton()
         current_color = {"value": value or "#d00000"}
@@ -1350,6 +1361,10 @@ class MainWindow(QMainWindow):
         self.update_route_button()
         self.board.update()
 
+    def _set_current_keepout_color(self, color: str) -> None:
+        self.board.current_keepout_color = color
+        self.board.update()
+
     def update_route_button(self) -> None:
         if not hasattr(self, "footer_route_button"):
             return
@@ -1368,6 +1383,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(5)
         current = QPushButton(value)
         current.setMinimumWidth(86)
+        current_color = {"value": value or "#d00000"}
 
         def apply_style(color_text: str) -> None:
             qcolor = QColor(color_text or "#d00000")
@@ -1378,13 +1394,14 @@ class MainWindow(QMainWindow):
         def apply_color(color_text: str) -> None:
             if not color_text:
                 return
-            apply_style(color_text)
-            changed(color_text)
+            current_color["value"] = color_text
+            apply_style(current_color["value"])
+            changed(current_color["value"])
             self.populate_wire_colors()
             self.update_route_button()
             self.board.update()
 
-        apply_style(value)
+        apply_style(current_color["value"])
         current.clicked.connect(lambda: choose_custom())
         layout.addWidget(current)
 
@@ -1406,7 +1423,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(more)
 
         def choose_custom() -> None:
-            color = QColorDialog.getColor(QColor(value), self, "Choose wire color")
+            color = QColorDialog.getColor(QColor(current_color["value"]), self, "Choose wire color")
             if color.isValid():
                 apply_color(color.name())
 
@@ -1451,8 +1468,9 @@ class MainWindow(QMainWindow):
             form.addRow("Title", self._line(p.title, lambda v: self._apply_change("Edit title", lambda: setattr(p, "title", v))))
             form.addRow("Author", self._line(p.author, lambda v: self._apply_change("Edit author", lambda: setattr(p, "author", v))))
             form.addRow("Revision", self._line(p.revision, lambda v: self._apply_change("Edit revision", lambda: setattr(p, "revision", v))))
-            notes = QTextEdit(p.notes); notes.setMinimumHeight(70); notes.textChanged.connect(lambda: setattr(p, "notes", notes.toPlainText()))
-            form.addRow("Notes", notes)
+            form.addRow("Notes", self._project_text_area(p.notes, lambda v: setattr(p, "notes", v)))
+            form.addRow("Todo", self._project_text_area(p.todo, lambda v: setattr(p, "todo", v), minimum_height=60))
+            form.addRow("Changelog", self._project_text_area(p.changelog, lambda v: setattr(p, "changelog", v), minimum_height=60))
 
             _, view = self._card("View")
             cb_names = QCheckBox("Show component names"); cb_names.setChecked(self.board.show_component_names); cb_names.toggled.connect(lambda v: setattr(self.board, "show_component_names", v) or self.board.update())
@@ -1523,7 +1541,7 @@ class MainWindow(QMainWindow):
 
     def _inspect_new_keepout_tool(self) -> None:
         _, keepout = self._card("Keepout mode")
-        keepout.addRow("Color", self._color_button(self.board.current_keepout_color, lambda v: setattr(self.board, "current_keepout_color", v)))
+        keepout.addRow("Color", self._color_button(self.board.current_keepout_color, self._set_current_keepout_color))
         hint = QLabel("Click two opposite corners to create a mechanical no-go area. Visibility is controlled from Select mode → View.")
         hint.setObjectName("MutedLabel")
         hint.setWordWrap(True)

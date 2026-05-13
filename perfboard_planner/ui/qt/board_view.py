@@ -82,6 +82,7 @@ class BoardView(QWidget):
     def set_layout(self, layout: Layout) -> None:
         self.layout_model = layout
         self.hidden_groups.clear()
+        self.hidden_wire_colors.clear()
         self.highlighted_groups.clear()
         self.selected.clear()
         self.temp_wire.clear()

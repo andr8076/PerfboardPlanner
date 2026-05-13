@@ -2,7 +2,7 @@ import pytest
 
 from perfboard_planner.core.commands import Command, CommandStack
 from perfboard_planner.core.geometry import rotate_component_footprint_90
-from perfboard_planner.core.models import Component, ComponentPin, Wire, Via
+from perfboard_planner.core.models import Component, ComponentPin, Layout, Wire, Via
 from perfboard_planner.core.storage import layout_from_dict, layout_to_dict
 from perfboard_planner.core.connectivity import build_graph, connected_nodes
 
@@ -109,6 +109,10 @@ def test_qt_duplicate_and_paste_selected_items(monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
     try:
+        window.board.hidden_wire_colors.add("#d00000")
+        window.board.set_layout(Layout())
+        assert window.board.hidden_wire_colors == set()
+
         window.layout_model.components.append(Component("R1", 0, 0, 2, 1, "#ffcc66", component_type="resistor"))
         window.board.selected = {("component", 0)}
 
