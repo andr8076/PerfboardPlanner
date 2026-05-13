@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple
+from typing import List, Tuple
 
 GridPoint = Tuple[int, int]
 

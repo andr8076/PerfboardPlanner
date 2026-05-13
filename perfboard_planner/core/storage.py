@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 from .geometry import normalized_angle
 from .models import (
@@ -36,6 +36,12 @@ def _as_int(value: object, default: int = 0) -> int:
         return int(value)  # type: ignore[arg-type]
     except Exception:
         return default
+
+
+def _as_sequence(value: object) -> Sequence[object]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return value
+    return []
 
 
 def normalize_pins(pins: Sequence[ComponentPin], width: int, height: int) -> List[ComponentPin]:
@@ -74,13 +80,23 @@ def normalize_jumpers(jumpers: Sequence[ComponentJumper], pins: Sequence[Compone
 def component_from_dict(data: Mapping[str, Any]) -> Component:
     width = max(1, _as_int(data.get("width"), 1))
     height = max(1, _as_int(data.get("height"), 1))
+    pin_data = _as_sequence(data.get("pins", []))
+    jumper_data = _as_sequence(data.get("jumpers", []))
     pins = normalize_pins(
-        [ComponentPin(str(p.get("name", "")), _as_int(p.get("row")), _as_int(p.get("col"))) for p in data.get("pins", [])],
+        [
+            ComponentPin(str(p.get("name", "")), _as_int(p.get("row")), _as_int(p.get("col")))
+            for p in pin_data
+            if isinstance(p, Mapping)
+        ],
         width,
         height,
     )
     jumpers = normalize_jumpers(
-        [ComponentJumper(str(j.get("pin_a", "")), str(j.get("pin_b", "")), str(j.get("color", "#00aaff"))) for j in data.get("jumpers", [])],
+        [
+            ComponentJumper(str(j.get("pin_a", "")), str(j.get("pin_b", "")), str(j.get("color", "#00aaff")))
+            for j in jumper_data
+            if isinstance(j, Mapping)
+        ],
         pins,
     )
     return Component(
@@ -107,7 +123,7 @@ def component_from_dict(data: Mapping[str, Any]) -> Component:
 
 def wire_from_dict(data: Mapping[str, Any]) -> Wire:
     points = []
-    for p in data.get("points", []):
+    for p in _as_sequence(data.get("points", [])):
         if isinstance(p, (list, tuple)) and len(p) >= 2:
             points.append((_as_int(p[0]), _as_int(p[1])))
     return Wire(
@@ -180,11 +196,11 @@ def layout_from_dict(data: Mapping[str, Any]) -> Layout:
         rows=max(1, _as_int(board.get("rows"), _as_int(data.get("rows"), 30))),
         cols=max(1, _as_int(board.get("cols"), _as_int(data.get("cols"), 45))),
         spacing=max(1, _as_int(board.get("spacing"), _as_int(data.get("spacing"), 22))),
-        components=[component_from_dict(c) for c in data.get("components", []) if isinstance(c, Mapping)],
-        wires=[wire_from_dict(w) for w in data.get("wires", []) if isinstance(w, Mapping)],
-        vias=[via_from_dict(v) for v in data.get("vias", []) if isinstance(v, Mapping)],
-        annotations=[annotation_from_dict(a) for a in data.get("annotations", []) if isinstance(a, Mapping)],
-        keepouts=[keepout_from_dict(k) for k in data.get("keepouts", []) if isinstance(k, Mapping)],
+        components=[component_from_dict(c) for c in _as_sequence(data.get("components", [])) if isinstance(c, Mapping)],
+        wires=[wire_from_dict(w) for w in _as_sequence(data.get("wires", [])) if isinstance(w, Mapping)],
+        vias=[via_from_dict(v) for v in _as_sequence(data.get("vias", [])) if isinstance(v, Mapping)],
+        annotations=[annotation_from_dict(a) for a in _as_sequence(data.get("annotations", [])) if isinstance(a, Mapping)],
+        keepouts=[keepout_from_dict(k) for k in _as_sequence(data.get("keepouts", [])) if isinstance(k, Mapping)],
         project=project_from_dict(data.get("project") if isinstance(data.get("project"), Mapping) else None),
         schema_version=_as_int(data.get("schema_version", data.get("version")), CURRENT_SCHEMA_VERSION),
     )

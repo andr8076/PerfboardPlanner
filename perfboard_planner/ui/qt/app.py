@@ -4,7 +4,7 @@ import copy
 import json
 import sys
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Optional
 
 from PySide6.QtCore import Qt, QSize, QPointF, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen, QShortcut, QBrush, QPainterPath
@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -48,8 +47,9 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.bom import bom_csv, bom_rows
+from ...core.geometry import rotate_component_footprint_90
 from ...core.checks import LayoutWarning, layout_warnings, pin_connection_counts
-from ...core.models import Annotation, Component, ComponentJumper, ComponentPin, KeepoutZone, Layout, Via, Wire
+from ...core.models import Annotation, Component, ComponentJumper, ComponentPin, Layout
 from ...core.storage import layout_from_dict, layout_to_dict, load_layout_file, save_layout_file
 from .board_view import BoardView, Selection
 from .style import APP_STYLESHEET
@@ -86,6 +86,8 @@ class MainWindow(QMainWindow):
         self.autosave_path = Path.home() / ".perfboard_planner_recovery.json"
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
+        self.clipboard_items: list[dict] = []
+        self.clipboard_paste_count = 0
         self.max_pin_connections = 2
         self.count_pin_connections_both_sides = True
         self._building_inspector = False
@@ -267,6 +269,12 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.undo_action); toolbar.addAction(self.redo_action)
         toolbar.addSeparator()
 
+        self.copy_action = QAction("Copy", self); self.copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        self.paste_action = QAction("Paste", self); self.paste_action.setShortcut(QKeySequence.StandardKey.Paste)
+        self.duplicate_action = QAction("Duplicate", self); self.duplicate_action.setShortcut(QKeySequence("Ctrl+D"))
+        toolbar.addAction(self.copy_action); toolbar.addAction(self.paste_action); toolbar.addAction(self.duplicate_action)
+        toolbar.addSeparator()
+
         self.mode_group = QActionGroup(self)
         self.mode_actions: dict[str, QAction] = {}
         mode_defs = [
@@ -313,6 +321,12 @@ class MainWindow(QMainWindow):
         self.lock_button = QPushButton("Lock / unlock")
         row.addWidget(self.delete_button); row.addWidget(self.lock_button)
         objects_layout.addLayout(row)
+        clipboard_row = QHBoxLayout()
+        self.copy_button = QPushButton("Copy")
+        self.paste_button = QPushButton("Paste")
+        self.duplicate_button = QPushButton("Duplicate")
+        clipboard_row.addWidget(self.copy_button); clipboard_row.addWidget(self.paste_button); clipboard_row.addWidget(self.duplicate_button)
+        objects_layout.addLayout(clipboard_row)
         tabs.addTab(objects_tab, "Objects")
 
         # Groups / modules
@@ -398,6 +412,9 @@ class MainWindow(QMainWindow):
         self.save_as_action.triggered.connect(self.save_file_as)
         self.undo_action.triggered.connect(self.undo)
         self.redo_action.triggered.connect(self.redo)
+        self.copy_action.triggered.connect(self.copy_selected)
+        self.paste_action.triggered.connect(self.paste_clipboard)
+        self.duplicate_action.triggered.connect(self.duplicate_selected)
         self.mode_group.triggered.connect(lambda action: self.set_tool(action.data()))
         self.front_side_action.triggered.connect(lambda: self.set_side("front"))
         self.back_side_action.triggered.connect(lambda: self.set_side("back"))
@@ -406,6 +423,7 @@ class MainWindow(QMainWindow):
         self.board.beforeLayoutChange.connect(self.push_undo)
         self.board.layoutChanged.connect(self._on_layout_changed)
         self.board.selectionChanged.connect(self.populate_inspector)
+        self.board.selectionChanged.connect(self._update_clipboard_actions)
         self.board.statusMessage.connect(self.statusBar().showMessage)
         self.board.toolRequested.connect(self.set_tool)
         self.board.zoomChanged.connect(self.update_zoom_label)
@@ -415,6 +433,9 @@ class MainWindow(QMainWindow):
         self.board.quickActionRequested.connect(self.handle_quick_action)
         self.delete_button.clicked.connect(self.safe_delete_selected)
         self.lock_button.clicked.connect(self.toggle_lock_selected)
+        self.copy_button.clicked.connect(self.copy_selected)
+        self.paste_button.clicked.connect(self.paste_clipboard)
+        self.duplicate_button.clicked.connect(self.duplicate_selected)
         self.object_tree.itemClicked.connect(self.select_from_object_tree)
         self.warning_list.itemClicked.connect(self.focus_warning_item)
         self.mute_warning_button.clicked.connect(self.mute_selected_warning)
@@ -510,6 +531,16 @@ class MainWindow(QMainWindow):
     def _update_undo_actions(self) -> None:
         self.undo_action.setEnabled(bool(self.undo_stack)); self.redo_action.setEnabled(bool(self.redo_stack))
 
+    def _update_clipboard_actions(self) -> None:
+        has_selection = bool(self.board.selected)
+        has_clipboard = bool(self.clipboard_items)
+        for widget_name in ("copy_action", "copy_button", "duplicate_action", "duplicate_button"):
+            if hasattr(self, widget_name):
+                getattr(self, widget_name).setEnabled(has_selection)
+        for widget_name in ("paste_action", "paste_button"):
+            if hasattr(self, widget_name):
+                getattr(self, widget_name).setEnabled(has_clipboard)
+
     def _update_window_title(self) -> None:
         name = self.current_path.name if self.current_path else (self.layout_model.project.title or "Untitled")
         dirty = " *" if self.is_dirty else ""
@@ -583,7 +614,7 @@ class MainWindow(QMainWindow):
         self._remember_selected_component_template()
         self._refresh_all()
 
-    def _refresh_all(self) -> None:
+    def _refresh_all(self, *, refresh_inspector: bool = True) -> None:
         self.board.pin_count_map = pin_connection_counts(self.layout_model, count_both_sides=self.count_pin_connections_both_sides)
         self._warnings = layout_warnings(self.layout_model, max_pin_connections=self.max_pin_connections, count_both_sides=self.count_pin_connections_both_sides)
         active_warnings = self.active_warnings()
@@ -597,8 +628,10 @@ class MainWindow(QMainWindow):
         self.populate_recent_parts()
         self.update_route_button()
         self.populate_bom()
-        self.populate_inspector()
+        if refresh_inspector:
+            self.populate_inspector()
         self._update_undo_actions()
+        self._update_clipboard_actions()
 
     def new_file(self) -> None:
         if not self.confirm_discard_unsaved():
@@ -669,6 +702,128 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
         self.board.delete_selected()
+
+    def _selected_items_for_clipboard(self) -> list[dict]:
+        items: list[dict] = []
+        for kind, idx in sorted(self.board.selected, key=lambda sel: (sel[0], sel[1])):
+            collection = self.board._collection(kind)
+            if collection is None or not (0 <= idx < len(collection)):
+                continue
+            items.append({"kind": kind, "item": copy.deepcopy(collection[idx])})
+        return items
+
+    def _clipboard_offset(self) -> tuple[int, int]:
+        step = max(1, self.clipboard_paste_count)
+        return step, step
+
+    @staticmethod
+    def _fit_axis_delta(values: list[int], preferred_delta: int, max_value: int) -> int:
+        if not values:
+            return preferred_delta
+        low = min(values)
+        high = max(values)
+        if 0 <= low + preferred_delta and high + preferred_delta <= max_value:
+            return preferred_delta
+        fallback_delta = -preferred_delta
+        if 0 <= low + fallback_delta and high + fallback_delta <= max_value:
+            return fallback_delta
+        return max(-low, min(preferred_delta, max_value - high))
+
+    def _fit_delta_to_board(self, item_data: list[dict], dr: int, dc: int) -> tuple[int, int]:
+        rows: list[int] = []
+        cols: list[int] = []
+        for entry in item_data:
+            kind = entry["kind"]
+            item = entry["item"]
+            if kind in {"component", "via", "annotation"}:
+                rows.append(int(item.row)); cols.append(int(item.col))
+            elif kind == "wire":
+                rows.extend(int(r) for r, _ in item.points)
+                cols.extend(int(c) for _, c in item.points)
+            elif kind == "keepout":
+                rows.extend([int(item.row1), int(item.row2)])
+                cols.extend([int(item.col1), int(item.col2)])
+        return (
+            self._fit_axis_delta(rows, dr, self.layout_model.rows - 1),
+            self._fit_axis_delta(cols, dc, self.layout_model.cols - 1),
+        )
+
+    def _prepare_pasted_item(self, kind: str, item, dr: int, dc: int):
+        pasted = copy.deepcopy(item)
+        if hasattr(pasted, "locked"):
+            pasted.locked = False
+        if hasattr(pasted, "group"):
+            pasted.group = ""
+        if kind == "component":
+            pasted.name = self.board._next_component_name(pasted.name, pasted.component_type)
+            pasted.row = max(0, min(self.layout_model.rows - 1, int(pasted.row) + dr))
+            pasted.col = max(0, min(self.layout_model.cols - 1, int(pasted.col) + dc))
+        elif kind == "wire":
+            pasted.points = [
+                (
+                    max(0, min(self.layout_model.rows - 1, int(r) + dr)),
+                    max(0, min(self.layout_model.cols - 1, int(c) + dc)),
+                )
+                for r, c in pasted.points
+            ]
+        elif kind in {"via", "annotation"}:
+            pasted.row = max(0, min(self.layout_model.rows - 1, int(pasted.row) + dr))
+            pasted.col = max(0, min(self.layout_model.cols - 1, int(pasted.col) + dc))
+        elif kind == "keepout":
+            pasted.row1 = max(0, min(self.layout_model.rows - 1, int(pasted.row1) + dr))
+            pasted.row2 = max(0, min(self.layout_model.rows - 1, int(pasted.row2) + dr))
+            pasted.col1 = max(0, min(self.layout_model.cols - 1, int(pasted.col1) + dc))
+            pasted.col2 = max(0, min(self.layout_model.cols - 1, int(pasted.col2) + dc))
+        return pasted
+
+    def _paste_items(self, item_data: list[dict], label: str) -> None:
+        if not item_data:
+            return
+        dr, dc = self._clipboard_offset()
+        dr, dc = self._fit_delta_to_board(item_data, dr, dc)
+        self.push_undo(label)
+        new_selection: set[Selection] = set()
+        for entry in item_data:
+            kind = entry["kind"]
+            collection = self.board._collection(kind)
+            if collection is None:
+                continue
+            pasted = self._prepare_pasted_item(kind, entry["item"], dr, dc)
+            collection.append(pasted)
+            new_selection.add((kind, len(collection) - 1))
+        self.board.selected = new_selection
+        self.clipboard_paste_count += 1
+        self._set_dirty(True)
+        self._refresh_all()
+        self.board.selectionChanged.emit()
+        self.board.update()
+        self.statusBar().showMessage(f"{label}: {len(new_selection)} item{'s' if len(new_selection) != 1 else ''}.")
+
+    def copy_selected(self) -> None:
+        self.clipboard_items = self._selected_items_for_clipboard()
+        self.clipboard_paste_count = 1
+        count = len(self.clipboard_items)
+        self._update_clipboard_actions()
+        if count:
+            self.statusBar().showMessage(f"Copied {count} item{'s' if count != 1 else ''}.")
+        else:
+            self.statusBar().showMessage("Nothing selected to copy.")
+
+    def paste_clipboard(self) -> None:
+        if not self.clipboard_items:
+            self.statusBar().showMessage("Clipboard is empty.")
+            return
+        self._paste_items(self.clipboard_items, "Paste")
+
+    def duplicate_selected(self) -> None:
+        items = self._selected_items_for_clipboard()
+        if not items:
+            self.statusBar().showMessage("Nothing selected to duplicate.")
+            return
+        previous_count = self.clipboard_paste_count
+        self.clipboard_paste_count = 1
+        self._paste_items(items, "Duplicate")
+        self.clipboard_paste_count = previous_count
 
     def handle_quick_action(self, action: str) -> None:
         if len(self.board.selected) != 1:
@@ -1162,13 +1317,35 @@ class MainWindow(QMainWindow):
         w.currentTextChanged.connect(changed)
         return w
 
+    def _project_text_area(self, value: str, changed, *, minimum_height: int = 70) -> QTextEdit:
+        editor = QTextEdit(value)
+        editor.setMinimumHeight(minimum_height)
+
+        def apply_text() -> None:
+            changed(editor.toPlainText())
+            self._set_dirty(True)
+
+        editor.textChanged.connect(apply_text)
+        return editor
+
     def _color_button(self, value: str, changed) -> QPushButton:
-        btn = QPushButton(value)
-        btn.setStyleSheet(f"background:{value}; color:{'#fff' if QColor(value).lightness()<120 else '#111'}; border-radius:8px; padding:8px;")
+        btn = QPushButton()
+        current_color = {"value": value or "#d00000"}
+
+        def apply_style(color_text: str) -> None:
+            qcolor = QColor(color_text or "#d00000")
+            fg = "#fff" if qcolor.lightness() < 120 else "#111"
+            btn.setText(color_text)
+            btn.setStyleSheet(f"background:{color_text}; color:{fg}; border-radius:8px; padding:8px;")
+
         def choose():
-            color = QColorDialog.getColor(QColor(value), self, "Choose color")
+            color = QColorDialog.getColor(QColor(current_color["value"]), self, "Choose color")
             if color.isValid():
-                changed(color.name())
+                current_color["value"] = color.name()
+                apply_style(current_color["value"])
+                changed(current_color["value"])
+
+        apply_style(current_color["value"])
         btn.clicked.connect(choose)
         return btn
 
@@ -1183,6 +1360,10 @@ class MainWindow(QMainWindow):
     def _set_current_wire_color(self, color: str) -> None:
         self.board.current_wire_color = color
         self.update_route_button()
+        self.board.update()
+
+    def _set_current_keepout_color(self, color: str) -> None:
+        self.board.current_keepout_color = color
         self.board.update()
 
     def update_route_button(self) -> None:
@@ -1203,6 +1384,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(5)
         current = QPushButton(value)
         current.setMinimumWidth(86)
+        current_color = {"value": value or "#d00000"}
 
         def apply_style(color_text: str) -> None:
             qcolor = QColor(color_text or "#d00000")
@@ -1213,13 +1395,14 @@ class MainWindow(QMainWindow):
         def apply_color(color_text: str) -> None:
             if not color_text:
                 return
-            apply_style(color_text)
-            changed(color_text)
+            current_color["value"] = color_text
+            apply_style(current_color["value"])
+            changed(current_color["value"])
             self.populate_wire_colors()
             self.update_route_button()
             self.board.update()
 
-        apply_style(value)
+        apply_style(current_color["value"])
         current.clicked.connect(lambda: choose_custom())
         layout.addWidget(current)
 
@@ -1241,7 +1424,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(more)
 
         def choose_custom() -> None:
-            color = QColorDialog.getColor(QColor(value), self, "Choose wire color")
+            color = QColorDialog.getColor(QColor(current_color["value"]), self, "Choose wire color")
             if color.isValid():
                 apply_color(color.name())
 
@@ -1249,11 +1432,32 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _apply_change(self, label: str, fn) -> None:
+    def _apply_change(self, label: str, fn, *, refresh_inspector: bool = False) -> None:
         self.push_undo(label)
         fn()
         self._set_dirty(True)
-        self._refresh_all()
+        self._refresh_all(refresh_inspector=refresh_inspector)
+
+    def _edit_template(self, attr: str, value) -> None:
+        setattr(self.board.new_component_template, attr, value)
+        self.board.update()
+
+    def _set_template_size(self, attr: str, value: int) -> None:
+        setattr(self.board.new_component_template, attr, max(1, int(value)))
+        self.board.update()
+
+    def rotate_template_footprint(self) -> None:
+        rotate_component_footprint_90(self.board.new_component_template)
+        self.board.update()
+        self.populate_inspector()
+
+    def rotate_component_footprint(self, component: Component) -> None:
+        def do() -> None:
+            rotate_component_footprint_90(component)
+            component.row = max(0, min(self.layout_model.rows - component.height, component.row))
+            component.col = max(0, min(self.layout_model.cols - component.width, component.col))
+
+        self._apply_change("Rotate component footprint", do, refresh_inspector=True)
 
     def _inspect_project_and_tools(self) -> None:
         # The inspector is contextual. Project settings are only shown in the
@@ -1265,8 +1469,9 @@ class MainWindow(QMainWindow):
             form.addRow("Title", self._line(p.title, lambda v: self._apply_change("Edit title", lambda: setattr(p, "title", v))))
             form.addRow("Author", self._line(p.author, lambda v: self._apply_change("Edit author", lambda: setattr(p, "author", v))))
             form.addRow("Revision", self._line(p.revision, lambda v: self._apply_change("Edit revision", lambda: setattr(p, "revision", v))))
-            notes = QTextEdit(p.notes); notes.setMinimumHeight(70); notes.textChanged.connect(lambda: setattr(p, "notes", notes.toPlainText()))
-            form.addRow("Notes", notes)
+            form.addRow("Notes", self._project_text_area(p.notes, lambda v: setattr(p, "notes", v)))
+            form.addRow("Todo", self._project_text_area(p.todo, lambda v: setattr(p, "todo", v), minimum_height=60))
+            form.addRow("Changelog", self._project_text_area(p.changelog, lambda v: setattr(p, "changelog", v), minimum_height=60))
 
             _, view = self._card("View")
             cb_names = QCheckBox("Show component names"); cb_names.setChecked(self.board.show_component_names); cb_names.toggled.connect(lambda v: setattr(self.board, "show_component_names", v) or self.board.update())
@@ -1312,14 +1517,17 @@ class MainWindow(QMainWindow):
     def _inspect_new_component_template(self) -> None:
         _, newpart = self._card("Part mode · new component")
         t = self.board.new_component_template
-        newpart.addRow("Name", self._line(t.name, lambda v: setattr(t, "name", v)))
-        newpart.addRow("Value", self._line(t.value, lambda v: setattr(t, "value", v)))
-        newpart.addRow("Type", self._line(t.component_type, lambda v: setattr(t, "component_type", v)))
-        newpart.addRow("Category", self._combo(t.category, ["Passive", "Semiconductor", "IC", "Connector", "Module", "Custom"], lambda v: setattr(t, "category", v)))
-        newpart.addRow("Width", self._spin(t.width, 1, 100, lambda v: setattr(t, "width", v)))
-        newpart.addRow("Height", self._spin(t.height, 1, 100, lambda v: setattr(t, "height", v)))
-        newpart.addRow("Body angle", self._spin(t.rotation, 0, 359, lambda v: setattr(t, "rotation", v)))
-        newpart.addRow("Color", self._color_button(t.color, lambda v: setattr(t, "color", v)))
+        newpart.addRow("Name", self._line(t.name, lambda v: self._edit_template("name", v)))
+        newpart.addRow("Value", self._line(t.value, lambda v: self._edit_template("value", v)))
+        newpart.addRow("Type", self._line(t.component_type, lambda v: self._edit_template("component_type", v)))
+        newpart.addRow("Category", self._combo(t.category, ["Passive", "Semiconductor", "IC", "Connector", "Module", "Custom"], lambda v: self._edit_template("category", v)))
+        newpart.addRow("Width", self._spin(t.width, 1, 100, lambda v: self._set_template_size("width", v)))
+        newpart.addRow("Height", self._spin(t.height, 1, 100, lambda v: self._set_template_size("height", v)))
+        newpart.addRow("Body angle (visual)", self._spin(t.rotation, 0, 359, lambda v: self._edit_template("rotation", v)))
+        newpart.addRow("Color", self._color_button(t.color, lambda v: self._edit_template("color", v)))
+        rotate_btn = QPushButton("Rotate footprint 90°")
+        rotate_btn.clicked.connect(self.rotate_template_footprint)
+        newpart.addRow(rotate_btn)
         pins_btn = QPushButton("Edit template pins")
         pins_btn.clicked.connect(lambda: self.edit_component_pins(t, is_template=True))
         newpart.addRow(pins_btn)
@@ -1334,7 +1542,7 @@ class MainWindow(QMainWindow):
 
     def _inspect_new_keepout_tool(self) -> None:
         _, keepout = self._card("Keepout mode")
-        keepout.addRow("Color", self._color_button(self.board.current_keepout_color, lambda v: setattr(self.board, "current_keepout_color", v)))
+        keepout.addRow("Color", self._color_button(self.board.current_keepout_color, self._set_current_keepout_color))
         hint = QLabel("Click two opposite corners to create a mechanical no-go area. Visibility is controlled from Select mode → View.")
         hint.setObjectName("MutedLabel")
         hint.setWordWrap(True)
@@ -1358,7 +1566,10 @@ class MainWindow(QMainWindow):
         form.addRow("Column", self._spin(comp.col + 1, 1, self.layout_model.cols, lambda v: self._apply_change("Move component", lambda: setattr(comp, "col", v-1))))
         form.addRow("Width", self._spin(comp.width, 1, 100, lambda v: self._apply_change("Resize component", lambda: setattr(comp, "width", v))))
         form.addRow("Height", self._spin(comp.height, 1, 100, lambda v: self._apply_change("Resize component", lambda: setattr(comp, "height", v))))
-        form.addRow("Body angle", self._spin(comp.rotation, 0, 359, lambda v: self._apply_change("Rotate component", lambda: setattr(comp, "rotation", v))))
+        form.addRow("Body angle (visual)", self._spin(comp.rotation, 0, 359, lambda v: self._apply_change("Rotate component body", lambda: setattr(comp, "rotation", v))))
+        footprint_btn = QPushButton("Rotate footprint 90°")
+        footprint_btn.clicked.connect(lambda: self.rotate_component_footprint(comp))
+        form.addRow(footprint_btn)
         form.addRow("Color", self._color_button(comp.color, lambda v: self._apply_change("Color component", lambda: setattr(comp, "color", v))))
         show_name = QCheckBox("Show this component name"); show_name.setChecked(comp.show_name); show_name.toggled.connect(lambda v: self._apply_change("Toggle name", lambda: setattr(comp, "show_name", bool(v))))
         show_pins = QCheckBox("Show this component's pin names"); show_pins.setChecked(comp.show_pin_names); show_pins.toggled.connect(lambda v: self._apply_change("Toggle pins", lambda: setattr(comp, "show_pin_names", bool(v))))
