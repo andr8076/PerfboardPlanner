@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, List
+from typing import Callable, List
 
 
 @dataclass
@@ -19,11 +19,14 @@ class CommandStack:
         self.undo_stack: List[Command] = []
         self.redo_stack: List[Command] = []
 
-    def execute(self, command: Command) -> None:
-        command.do()
+    def _push_undo(self, command: Command) -> None:
         self.undo_stack.append(command)
         if len(self.undo_stack) > self.limit:
             self.undo_stack.pop(0)
+
+    def execute(self, command: Command) -> None:
+        command.do()
+        self._push_undo(command)
         self.redo_stack.clear()
 
     def undo(self) -> bool:
@@ -39,5 +42,5 @@ class CommandStack:
             return False
         command = self.redo_stack.pop()
         command.do()
-        self.undo_stack.append(command)
+        self._push_undo(command)
         return True
