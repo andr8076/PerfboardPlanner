@@ -10,6 +10,7 @@ A desktop app for planning circuit layouts on perfboards. It helps you place com
 - Place vias, traces, and keepout zones
 - Auto-numbering for components (R1, R2, U1, etc.)
 - See a live preview before you place something
+- Copy, paste, and duplicate selected items with standard shortcuts
 
 **Routing & Connections**
 - Auto-route traces between component pins

@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import Dict, Iterable, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QBrush, QWheelEvent
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from ...core.geometry import board_contains, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment
-from ...core.models import Annotation, Component, ComponentPin, KeepoutZone, Layout, Via, Wire
-from ...core.routing import simple_dogleg_route
+from ...core.models import Component, ComponentPin, KeepoutZone, Layout, Via, Wire
 
 Selection = Tuple[str, int]
 GridPoint = Tuple[int, int]

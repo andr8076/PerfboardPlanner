@@ -1,3 +1,5 @@
+import pytest
+
 from perfboard_planner.core.commands import Command, CommandStack
 from perfboard_planner.core.models import Wire, Via
 from perfboard_planner.core.storage import layout_from_dict, layout_to_dict
@@ -72,3 +74,34 @@ def test_command_stack_clears_redo_history_on_new_execute():
     assert not stack.redo()
     assert [command.label for command in stack.undo_stack] == ["third"]
     assert events == ["do1", "do2", "undo2", "do3"]
+
+
+def test_qt_duplicate_and_paste_selected_items(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.core.models import Component
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        window.layout_model.components.append(Component("R1", 0, 0, 2, 1, "#ffcc66", component_type="resistor"))
+        window.board.selected = {("component", 0)}
+
+        window.duplicate_selected()
+        assert [component.name for component in window.layout_model.components] == ["R1", "R2"]
+        assert (window.layout_model.components[1].row, window.layout_model.components[1].col) == (1, 1)
+        assert window.board.selected == {("component", 1)}
+
+        window.copy_selected()
+        window.paste_clipboard()
+        window.paste_clipboard()
+        assert [component.name for component in window.layout_model.components] == ["R1", "R2", "R3", "R4"]
+        assert (window.layout_model.components[2].row, window.layout_model.components[2].col) == (2, 2)
+        assert (window.layout_model.components[3].row, window.layout_model.components[3].col) == (3, 3)
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
