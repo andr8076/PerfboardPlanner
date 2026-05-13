@@ -226,6 +226,11 @@ def test_qt_select_all_and_edge_duplicate(monkeypatch):
         )
         try:
             editor.refresh_grid()
+            rows, cols = editor._range()
+            expected_cells = len(rows) * len(cols)
+            assert len(editor.grid_frame.findChildren(qt_widgets.QToolButton)) == expected_cells
+            editor.toggle_pin_cell(0, -1)
+            assert len(editor.grid_frame.findChildren(qt_widgets.QToolButton)) == expected_cells
             assert editor.grid_frame.width() < 700
             assert editor.grid_frame.height() < 700
         finally:

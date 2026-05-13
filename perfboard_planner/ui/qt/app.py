@@ -2058,6 +2058,7 @@ class PinEditorDialog(QDialog):
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.grid_scroll = QScrollArea()
         self.grid_scroll.setWidgetResizable(False)
+        self.grid_scroll.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.grid_scroll.setWidget(self.grid_frame)
         self.grid_scroll.setMinimumWidth(420)
         body.addWidget(self.grid_scroll, 1)
@@ -2165,9 +2166,13 @@ class PinEditorDialog(QDialog):
         self.refresh_jumpers()
 
     def refresh_grid(self) -> None:
+        self.grid_frame.setMinimumSize(0, 0)
+        self.grid_frame.setMaximumSize(16_777_215, 16_777_215)
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             if item.widget():
+                item.widget().hide()
+                item.widget().setParent(None)
                 item.widget().deleteLater()
         rows, cols = self._range()
         row_count = len(rows)
