@@ -70,3 +70,12 @@ def rotate_component_footprint_90(component) -> None:
         old_row, old_col = int(pin.row), int(pin.col)
         pin.row = old_col
         pin.col = old_height - 1 - old_row
+
+
+def clamp_component_position(row: int, col: int, width: int, height: int, rows: int, cols: int) -> GridPoint:
+    """Clamp a component's top-left cell so its full footprint stays on-board."""
+    safe_width = max(1, int(width))
+    safe_height = max(1, int(height))
+    max_row = max(0, int(rows) - safe_height)
+    max_col = max(0, int(cols) - safe_width)
+    return max(0, min(max_row, int(row))), max(0, min(max_col, int(col)))

@@ -8,12 +8,12 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
-from ...core.geometry import board_contains, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment, rotate_component_footprint_90
+from ...core.geometry import board_contains, clamp_component_position, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment, rotate_component_footprint_90
 from ...core.models import Component, ComponentPin, KeepoutZone, Layout, Via, Wire
 
 Selection = Tuple[str, int]
 GridPoint = Tuple[int, int]
-UI_FONT_FAMILY = ""
+DEFAULT_UI_FONT_FAMILY = "Sans Serif"
 
 
 class BoardView(QWidget):
@@ -32,6 +32,7 @@ class BoardView(QWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.ui_font_family = self.font().family() or DEFAULT_UI_FONT_FAMILY
         self.layout_model = Layout()
         self.tool = "select"
         self.side = "front"
@@ -79,6 +80,10 @@ class BoardView(QWidget):
         self.flip_cue_frames = 0
         self.flip_cue_text = ""
         self._quick_button_rects: dict[str, QRectF] = {}
+
+
+    def _font(self, point_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+        return QFont(self.ui_font_family, point_size, weight)
 
     def set_layout(self, layout: Layout) -> None:
         self.layout_model = layout
@@ -258,7 +263,7 @@ class BoardView(QWidget):
         # out, especially along the top edge.
         painter.save()
         font_size = max(6, min(11, int(8.0 * self.zoom)))
-        painter.setFont(QFont(UI_FONT_FAMILY, font_size, QFont.Weight.Bold))
+        painter.setFont(self._font(font_size, QFont.Weight.Bold))
         rail_bg = QColor(15, 23, 42, 118)
         text_color = QColor("#dbeafe")
         tick_pen = QPen(QColor(219, 234, 254, 88), max(1.0, 1.0 * self.zoom))
@@ -340,7 +345,7 @@ class BoardView(QWidget):
         painter.drawArc(QRectF(x + 22, y + 14, 44, 36), 35 * 16, 285 * 16)
         painter.drawLine(QPointF(x + 61, center_y - 14), QPointF(x + 72, center_y - 6))
         painter.drawLine(QPointF(x + 61, center_y - 14), QPointF(x + 61, center_y - 1))
-        painter.setFont(QFont(UI_FONT_FAMILY, max(11, int(14 * self.zoom)), QFont.Weight.Bold))
+        painter.setFont(self._font(max(11, int(14 * self.zoom)), QFont.Weight.Bold))
         painter.drawText(rect.adjusted(90, 0, -16, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.flip_cue_text)
 
     def _draw_shadow_panel(self, painter: QPainter) -> None:
@@ -805,6 +810,71 @@ class BoardView(QWidget):
         pad = self.layout_model.spacing * self.zoom * 0.42
         return QRectF(min(p1.x(), p2.x()) - pad, min(p1.y(), p2.y()) - pad, abs(p2.x() - p1.x()) + pad * 2, abs(p2.y() - p1.y()) + pad * 2)
 
+    def _should_draw_pin_names(self, comp: Component, *, ghost: bool) -> bool:
+        if ghost:
+            return self.show_other_pins and self.zoom >= 0.65 and len(comp.pins) <= 32
+        if not (self.show_pin_names and comp.show_pin_names):
+            return False
+        if self.zoom < 0.5:
+            return False
+        if len(comp.pins) > 48 and self.zoom < 1.35:
+            return False
+        if len(comp.pins) > 28 and self.zoom < 0.9:
+            return False
+        return True
+
+    def _pin_label_rect(self, comp: Component, pin: ComponentPin, point: QPointF, label: str, metrics) -> QRectF:
+        margin = max(5.0, 6.0 * self.zoom)
+        width = metrics.horizontalAdvance(label) + 8.0
+        height = metrics.height() + 3.0
+        rect = self._component_rect(comp)
+
+        if pin.col < 0:
+            x = point.x() - margin - width
+            y = point.y() - height / 2
+        elif pin.col >= comp.width:
+            x = point.x() + margin
+            y = point.y() - height / 2
+        elif pin.row < 0:
+            x = point.x() - width / 2
+            y = point.y() - margin - height
+        elif pin.row >= comp.height:
+            x = point.x() - width / 2
+            y = point.y() + margin
+        else:
+            # Internal pins on small parts are the ones most likely to look odd.
+            # Push labels away from the component center instead of always to the
+            # upper-right, which caused overlap on 1x/2x footprints.
+            dx = point.x() - rect.center().x()
+            dy = point.y() - rect.center().y()
+            if abs(dx) >= abs(dy):
+                x = point.x() + margin if dx >= 0 else point.x() - margin - width
+                y = point.y() - height / 2
+            else:
+                x = point.x() - width / 2
+                y = point.y() + margin if dy >= 0 else point.y() - margin - height
+        return QRectF(x, y, width, height)
+
+    def _draw_pin_label(self, painter: QPainter, comp: Component, pin: ComponentPin, point: QPointF, alpha: float, ghost: bool, occupied: list[QRectF]) -> None:
+        font_size = max(6, min(10, int(8 * self.zoom)))
+        painter.setFont(self._font(font_size))
+        metrics = painter.fontMetrics()
+        max_width = int(max(26.0, min(92.0, self.layout_model.spacing * self.zoom * (2.9 if pin.col < 0 or pin.col >= comp.width else 2.2))))
+        label = metrics.elidedText(pin.name, Qt.TextElideMode.ElideRight, max_width)
+        if not label:
+            return
+        label_rect = self._pin_label_rect(comp, pin, point, label, metrics)
+        padded = label_rect.adjusted(-2, -2, 2, 2)
+        if any(padded.intersects(existing) for existing in occupied):
+            return
+        occupied.append(padded)
+        if not ghost:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 218))
+            painter.drawRoundedRect(label_rect, 4, 4)
+        painter.setPen(self._color("#111827", 0.72 if not ghost else min(0.45, alpha + 0.12)))
+        painter.drawText(label_rect.adjusted(4, 0, -4, 0), Qt.AlignmentFlag.AlignCenter, label)
+
     def _draw_component(self, painter: QPainter, index: int, comp: Component, *, alpha: float, ghost: bool) -> None:
         rect = self._component_rect(comp)
         selected = ("component", index) in self.selected
@@ -826,6 +896,8 @@ class BoardView(QWidget):
                 br, bc = component_pin_absolute(comp, pb)
                 painter.setPen(QPen(self._color(jumper.color, alpha), max(2.0, 3.0 * self.zoom), Qt.PenStyle.DashLine if ghost else Qt.PenStyle.SolidLine))
                 painter.drawLine(self.grid_to_view(ar, ac), self.grid_to_view(br, bc))
+        draw_pin_names = self._should_draw_pin_names(comp, ghost=ghost)
+        pin_label_rects: list[QRectF] = []
         for pin in comp.pins:
             r, c = component_pin_absolute(comp, pin)
             if not board_contains(r, c, self.layout_model.rows, self.layout_model.cols):
@@ -837,20 +909,20 @@ class BoardView(QWidget):
             if self.show_pin_counts:
                 count = self.pin_count_map.get((index, pin.name))
                 if count is not None and count > 0 and not ghost:
+                    badge = QRectF(p.x()+5*self.zoom, p.y()-13*self.zoom, 16*self.zoom, 14*self.zoom)
                     painter.setBrush(QColor("#ffffff"))
                     painter.setPen(QPen(QColor("#334155"), 1))
-                    painter.drawRoundedRect(QRectF(p.x()+5*self.zoom, p.y()-13*self.zoom, 16*self.zoom, 14*self.zoom), 5, 5)
-                    painter.drawText(QRectF(p.x()+5*self.zoom, p.y()-13*self.zoom, 16*self.zoom, 14*self.zoom), Qt.AlignmentFlag.AlignCenter, str(count))
-            if (self.show_pin_names and comp.show_pin_names and not ghost) or (ghost and self.show_other_pins):
-                painter.setPen(self._color("#111827", 0.65 if not ghost else 0.32))
-                painter.setFont(QFont(UI_FONT_FAMILY, max(7, int(8 * self.zoom))))
-                painter.drawText(QPointF(p.x() + 7 * self.zoom, p.y() - 7 * self.zoom), pin.name)
+                    painter.drawRoundedRect(badge, 5, 5)
+                    painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(count))
+                    pin_label_rects.append(badge.adjusted(-2, -2, 2, 2))
+            if draw_pin_names:
+                self._draw_pin_label(painter, comp, pin, p, alpha, ghost, pin_label_rects)
         if self.show_component_names and comp.show_name and not ghost:
             painter.setPen(QColor("#0f172a"))
-            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(self._font(max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, comp.name)
             if comp.value:
-                painter.setFont(QFont(UI_FONT_FAMILY, max(7, int(8 * self.zoom))))
+                painter.setFont(self._font(max(7, int(8 * self.zoom))))
                 painter.drawText(rect.adjusted(0, 16*self.zoom, 0, 0), Qt.AlignmentFlag.AlignCenter, comp.value)
 
     def _draw_wires(self, painter: QPainter, *, ghost: bool) -> None:
@@ -893,7 +965,7 @@ class BoardView(QWidget):
         if wire.name and not ghost and len(pts) >= 2:
             mid = pts[len(pts)//2]
             painter.setPen(QColor("#111827"))
-            painter.setFont(QFont(UI_FONT_FAMILY, max(7, int(8 * self.zoom))))
+            painter.setFont(self._font(max(7, int(8 * self.zoom))))
             painter.drawText(QPointF(mid.x()+8*self.zoom, mid.y()-8*self.zoom), wire.name)
 
     def _draw_vias(self, painter: QPainter) -> None:
@@ -1021,7 +1093,7 @@ class BoardView(QWidget):
             painter.setBrush(QColor(color.red(), color.green(), color.blue(), 20))
             painter.setPen(QPen(color, 1.6, Qt.PenStyle.DashLine))
             painter.drawRoundedRect(rect, 14, 14)
-            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(self._font(max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             painter.setPen(color)
             painter.drawText(rect.adjusted(8, 2, -8, -2), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, group)
 
@@ -1053,7 +1125,7 @@ class BoardView(QWidget):
         if not route:
             painter.save()
             painter.setPen(QPen(QColor("#ef4444"), max(2.0, 2.4 * self.zoom)))
-            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(self._font(max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             p = self.grid_to_view(*start)
             painter.drawText(QPointF(p.x() + 12 * self.zoom, p.y() - 12 * self.zoom), "No safe route")
             painter.restore()
@@ -1106,7 +1178,7 @@ class BoardView(QWidget):
             painter.setPen(QPen(QColor("#ef4444") if invalid else QColor("#2457d6"), 2, Qt.PenStyle.DashLine))
             painter.drawRoundedRect(rect, 10, 10)
             painter.setPen(QColor("#0f172a"))
-            painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+            painter.setFont(self._font(max(8, int(9 * self.zoom)), QFont.Weight.Bold))
             painter.drawText(rect.adjusted(8, -22, -8, -4), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, comp.name)
         elif self.tool == "via":
             p = self.grid_to_view(*grid)
@@ -1183,7 +1255,7 @@ class BoardView(QWidget):
         if y < 8:
             y = rect.bottom() + 14
         painter.save()
-        painter.setFont(QFont(UI_FONT_FAMILY, max(8, int(9 * self.zoom)), QFont.Weight.Bold))
+        painter.setFont(self._font(max(8, int(9 * self.zoom)), QFont.Weight.Bold))
         for action, label in labels:
             brect = QRectF(x, y, size if action != "pins" else size * 1.55, size)
             self._quick_button_rects[action] = brect
@@ -1551,8 +1623,14 @@ class BoardView(QWidget):
         for idx in unlocked:
             comp = self.layout_model.components[idx]
             rotate_component_footprint_90(comp)
-            comp.row = max(0, min(self.layout_model.rows - comp.height, comp.row))
-            comp.col = max(0, min(self.layout_model.cols - comp.width, comp.col))
+            comp.row, comp.col = clamp_component_position(
+                comp.row,
+                comp.col,
+                comp.width,
+                comp.height,
+                self.layout_model.rows,
+                self.layout_model.cols,
+            )
         self.layoutChanged.emit(); self.update()
 
     def _collection(self, kind: str):
@@ -1598,7 +1676,14 @@ class BoardView(QWidget):
             item = collection[sel[1]]
             if sel[0] == "component":
                 row, col = original
-                item.row = max(0, min(self.layout_model.rows-1, row+dr)); item.col = max(0, min(self.layout_model.cols-1, col+dc))
+                item.row, item.col = clamp_component_position(
+                    row + dr,
+                    col + dc,
+                    item.width,
+                    item.height,
+                    self.layout_model.rows,
+                    self.layout_model.cols,
+                )
             elif sel[0] == "wire":
                 item.points = [(max(0, min(self.layout_model.rows-1, r+dr)), max(0, min(self.layout_model.cols-1, c+dc))) for r, c in original]
             elif sel[0] in {"via", "annotation"}:

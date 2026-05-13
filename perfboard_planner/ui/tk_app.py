@@ -1204,61 +1204,6 @@ class PerfboardPlanner(tk.Tk):
         self.redraw()
         return "break"
 
-    def wire_unit_segments(self, wire: Wire) -> set:
-        # Break horizontal/vertical segments into single-hole spans. This lets
-        # auto-stagger detect partial overlaps, not only wires with identical
-        # endpoints. Diagonal/custom segments fall back to their whole segment.
-        result = set()
-        pts = [(int(r), int(c)) for r, c in wire.points]
-        for (r1, c1), (r2, c2) in zip(pts, pts[1:]):
-            if r1 == r2 and c1 != c2:
-                step = 1 if c2 > c1 else -1
-                for c in range(c1, c2, step):
-                    a = (r1, c)
-                    b = (r1, c + step)
-                    result.add(tuple(sorted((a, b))))
-            elif c1 == c2 and r1 != r2:
-                step = 1 if r2 > r1 else -1
-                for r in range(r1, r2, step):
-                    a = (r, c1)
-                    b = (r + step, c1)
-                    result.add(tuple(sorted((a, b))))
-            else:
-                result.add(tuple(sorted(((r1, c1), (r2, c2)))))
-        return result
-
-    def auto_stagger_overlapping_wires(self, event=None):
-        side = self.current_side.get()
-        indexed = [(i, self.wires[i]) for i in range(len(self.wires)) if self.wires[i].side == side]
-        if len(indexed) < 2:
-            self.status.set("Need at least two wires on this side to auto-stagger.")
-            return "break"
-
-        segment_sets = {i: self.wire_unit_segments(wire) for i, wire in indexed}
-        conflicts = {i: set() for i, _ in indexed}
-        for pos, (i, _) in enumerate(indexed):
-            for j, _ in indexed[pos + 1:]:
-                if segment_sets[i] and segment_sets[i].intersection(segment_sets[j]):
-                    conflicts[i].add(j)
-                    conflicts[j].add(i)
-
-        active_conflicts = {i: neighbours for i, neighbours in conflicts.items() if neighbours}
-        if not active_conflicts:
-            self.status.set("No overlapping wire runs found on this side.")
-            return "break"
-
-        lane_choices = [0, 1, -1, 2, -2, 3, -3, 4, -4]
-        for i in sorted(active_conflicts, key=lambda idx: len(active_conflicts[idx]), reverse=True):
-            used = {self.wire_lane_value(self.wires[j]) for j in active_conflicts[i] if hasattr(self.wires[j], "lane")}
-            for lane in lane_choices:
-                if lane not in used:
-                    self.wires[i].lane = lane
-                    break
-
-        self.status.set(f"Auto-staggered {len(active_conflicts)} overlapping wire(s) on the {self.current_side_label()} side.")
-        self.redraw()
-        return "break"
-
     def open_component_editor(self, component_index: int):
         if not (0 <= component_index < len(self.components)):
             self.status.set("The selected component no longer exists.")
@@ -3966,7 +3911,6 @@ class PerfboardPlanner(tk.Tk):
         if not self.show_layout_warnings.get():
             return
         visible_sides = self.visible_warning_sides()
-        current = self.current_side.get()
         warning_color = "#ff0000"
         warning_width = max(2, round(3 * self.zoom))
         warning_dash = (max(3, round(6 * self.zoom)), max(2, round(4 * self.zoom)))
@@ -5895,7 +5839,6 @@ def _v28_update_wire_color_menu(self):
                 btn.configure(cursor="hand2")
             except Exception:
                 pass
-            hatch = tk.Canvas(btn, width=1, height=1, highlightthickness=0, bg="#f8fafc")
         status_text = f"{color}: {total} wire{'s' if total != 1 else ''} ({front} front, {back} back). Click to {'show' if hidden else 'hide'}."
         btn.bind("<Button-1>", lambda _e, c=color: self.toggle_wire_color_visibility(c))
         btn.bind("<Enter>", lambda _e, text=status_text: self.status.set(text))
