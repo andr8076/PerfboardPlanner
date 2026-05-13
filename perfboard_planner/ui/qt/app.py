@@ -614,7 +614,7 @@ class MainWindow(QMainWindow):
         self._remember_selected_component_template()
         self._refresh_all()
 
-    def _refresh_all(self) -> None:
+    def _refresh_all(self, *, refresh_inspector: bool = True) -> None:
         self.board.pin_count_map = pin_connection_counts(self.layout_model, count_both_sides=self.count_pin_connections_both_sides)
         self._warnings = layout_warnings(self.layout_model, max_pin_connections=self.max_pin_connections, count_both_sides=self.count_pin_connections_both_sides)
         active_warnings = self.active_warnings()
@@ -628,7 +628,8 @@ class MainWindow(QMainWindow):
         self.populate_recent_parts()
         self.update_route_button()
         self.populate_bom()
-        self.populate_inspector()
+        if refresh_inspector:
+            self.populate_inspector()
         self._update_undo_actions()
         self._update_clipboard_actions()
 
@@ -1431,11 +1432,32 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _apply_change(self, label: str, fn) -> None:
+    def _apply_change(self, label: str, fn, *, refresh_inspector: bool = False) -> None:
         self.push_undo(label)
         fn()
         self._set_dirty(True)
-        self._refresh_all()
+        self._refresh_all(refresh_inspector=refresh_inspector)
+
+    def _edit_template(self, attr: str, value) -> None:
+        setattr(self.board.new_component_template, attr, value)
+        self.board.update()
+
+    def _set_template_size(self, attr: str, value: int) -> None:
+        setattr(self.board.new_component_template, attr, max(1, int(value)))
+        self.board.update()
+
+    def rotate_template_footprint(self) -> None:
+        rotate_component_footprint_90(self.board.new_component_template)
+        self.board.update()
+        self.populate_inspector()
+
+    def rotate_component_footprint(self, component: Component) -> None:
+        def do() -> None:
+            rotate_component_footprint_90(component)
+            component.row = max(0, min(self.layout_model.rows - component.height, component.row))
+            component.col = max(0, min(self.layout_model.cols - component.width, component.col))
+
+        self._apply_change("Rotate component footprint", do, refresh_inspector=True)
 
     def _edit_template(self, attr: str, value) -> None:
         setattr(self.board.new_component_template, attr, value)
