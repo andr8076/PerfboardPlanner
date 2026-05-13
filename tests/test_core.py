@@ -178,8 +178,8 @@ def test_qt_select_all_and_edge_duplicate(monkeypatch):
     qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
     QApplication = qt_widgets.QApplication
 
-    from perfboard_planner.core.models import Component, Wire, Via
-    from perfboard_planner.ui.qt.app import MainWindow
+    from perfboard_planner.core.models import Component, ComponentPin, Wire, Via
+    from perfboard_planner.ui.qt.app import MainWindow, PinEditorDialog
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -212,6 +212,25 @@ def test_qt_select_all_and_edge_duplicate(monkeypatch):
         window._set_board_value("cols", 7)
         window._set_board_value("spacing", 30)
         assert (window.layout_model.rows, window.layout_model.cols, window.layout_model.spacing) == (6, 7, 30)
+
+        editor = PinEditorDialog(
+            Component(
+                "U1",
+                0,
+                0,
+                8,
+                13,
+                "#ffcc66",
+                pins=[ComponentPin(str(i), i, -1) for i in range(13)] + [ComponentPin(f"R{i}", i, 8) for i in range(13)],
+            )
+        )
+        try:
+            editor.refresh_grid()
+            assert editor.grid_frame.width() < 700
+            assert editor.grid_frame.height() < 700
+        finally:
+            editor.close()
+            editor.deleteLater()
 
         window.board.selected = {("component", 0)}
         window.duplicate_selected()

@@ -2051,9 +2051,11 @@ class PinEditorDialog(QDialog):
 
         self.grid_frame = QFrame()
         self.grid_frame.setObjectName("PinGridFrame")
+        self.grid_frame.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.grid_layout = QGridLayout(self.grid_frame)
         self.grid_layout.setContentsMargins(10, 10, 10, 10)
-        self.grid_layout.setSpacing(5)
+        self.grid_layout.setSpacing(4)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.grid_scroll = QScrollArea()
         self.grid_scroll.setWidgetResizable(False)
         self.grid_scroll.setWidget(self.grid_frame)
@@ -2132,12 +2134,27 @@ class PinEditorDialog(QDialog):
         return range(min_row, max_row + 1), range(min_col, max_col + 1)
 
     @staticmethod
-    def _pin_button_text(pin: ComponentPin | None) -> str:
+    def _pin_button_text(pin: ComponentPin | None, max_chars: int = 5) -> str:
         if pin is None:
-            return "•"
-        if len(pin.name) <= 5:
+            return ""
+        if len(pin.name) <= max_chars:
             return pin.name
-        return pin.name[:4] + "…"
+        return pin.name[: max(1, max_chars - 1)] + "…"
+
+    @staticmethod
+    def _grid_cell_size(row_count: int, col_count: int) -> QSize:
+        density = max(row_count, col_count)
+        if density >= 26:
+            return QSize(30, 26)
+        if density >= 18:
+            return QSize(34, 28)
+        if density >= 14:
+            return QSize(38, 30)
+        return QSize(44, 34)
+
+    @staticmethod
+    def _header_size(cell_size: QSize, *, row_header: bool) -> QSize:
+        return QSize(max(30, cell_size.width() - 8), cell_size.height()) if row_header else QSize(cell_size.width(), 22)
 
     def pin_at(self, row: int, col: int) -> Optional[ComponentPin]:
         return next((p for p in self.pins if p.row == row and p.col == col), None)
@@ -2153,39 +2170,48 @@ class PinEditorDialog(QDialog):
             if item.widget():
                 item.widget().deleteLater()
         rows, cols = self._range()
-        self.grid_layout.addWidget(QLabel(""), 0, 0)
+        row_count = len(rows)
+        col_count = len(cols)
+        cell_size = self._grid_cell_size(row_count, col_count)
+        max_pin_chars = 5 if cell_size.width() >= 38 else 3
+        corner = QLabel("")
+        corner.setFixedSize(self._header_size(cell_size, row_header=True))
+        self.grid_layout.addWidget(corner, 0, 0)
         for gc, col in enumerate(cols, start=1):
             lbl = QLabel(str(col))
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setObjectName("PinGridCoord")
-            lbl.setFixedSize(QSize(44, 22))
+            lbl.setFixedSize(self._header_size(cell_size, row_header=False))
             self.grid_layout.addWidget(lbl, 0, gc)
         for gr, row in enumerate(rows, start=1):
             lbl = QLabel(str(row))
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setObjectName("PinGridCoord")
-            lbl.setFixedSize(QSize(34, 36))
+            lbl.setFixedSize(self._header_size(cell_size, row_header=True))
             self.grid_layout.addWidget(lbl, gr, 0)
             for gc, col in enumerate(cols, start=1):
                 pin = self.pin_at(row, col)
                 btn = QToolButton()
-                btn.setFixedSize(QSize(44, 36))
+                btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                btn.setFixedSize(cell_size)
                 label = f"{pin.name} · " if pin else ""
                 btn.setToolTip(f"{label}relative row {row}, col {col}")
-                btn.setText(self._pin_button_text(pin))
+                btn.setText(self._pin_button_text(pin, max_pin_chars))
                 inside = 0 <= row < self.height and 0 <= col < self.width
                 if pin:
                     selected = pin.name == self.selected_pin_name
                     bg = "#111827" if selected else "#f8fafc"
                     fg = "#ffffff" if selected else "#111827"
                     border = "#2457d6" if selected else "#111827"
-                    btn.setStyleSheet(f"QToolButton {{background: {bg}; color: {fg}; border: 2px solid {border}; border-radius: 8px; font-weight: 800;}}")
+                    btn.setStyleSheet(f"QToolButton {{background: {bg}; color: {fg}; border: 2px solid {border}; border-radius: 7px; font-weight: 800; padding: 0;}}")
                 elif inside:
-                    btn.setStyleSheet("QToolButton {background: #ffe59a; color: #475569; border: 1px solid #f5c542; border-radius: 8px;} QToolButton:hover {border-color: #2457d6;}")
+                    btn.setStyleSheet("QToolButton {background: #ffe59a; color: #475569; border: 1px solid #f5c542; border-radius: 7px; padding: 0;} QToolButton:hover {border-color: #2457d6;}")
                 else:
-                    btn.setStyleSheet("QToolButton {background: #eef2f7; color: #64748b; border: 1px solid #cbd5e1; border-radius: 8px;} QToolButton:hover {border-color: #2457d6;}")
+                    btn.setStyleSheet("QToolButton {background: #eef2f7; color: #64748b; border: 1px solid #cbd5e1; border-radius: 7px; padding: 0;} QToolButton:hover {border-color: #2457d6;}")
                 btn.clicked.connect(lambda checked=False, r=row, c=col: self.toggle_pin_cell(r, c))
                 self.grid_layout.addWidget(btn, gr, gc)
+        self.grid_frame.adjustSize()
+        self.grid_frame.setFixedSize(self.grid_frame.sizeHint())
 
     def refresh_pin_list(self) -> None:
         self.pin_list.blockSignals(True)
