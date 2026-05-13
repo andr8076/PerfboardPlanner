@@ -4,7 +4,6 @@ APP_STYLESHEET = """
 QMainWindow, QWidget {
     background: #f6f7fb;
     color: #172033;
-    font-family: Segoe UI, Arial, sans-serif;
     font-size: 10pt;
 }
 QToolBar {
