@@ -1,9 +1,10 @@
 import pytest
 
 from perfboard_planner.core.commands import Command, CommandStack
-from perfboard_planner.core.geometry import rotate_component_footprint_90
-from perfboard_planner.core.models import Component, ComponentPin, Layout, Wire, Via
+from perfboard_planner.core.geometry import clamp_component_position, rotate_component_footprint_90
+from perfboard_planner.core.models import Component, ComponentPin, KeepoutZone, Layout, Wire, Via
 from perfboard_planner.core.storage import layout_from_dict, layout_to_dict
+from perfboard_planner.core.selection import is_selectable_item
 from perfboard_planner.core.connectivity import build_graph, connected_nodes
 
 
@@ -98,6 +99,45 @@ def test_rotate_component_footprint_moves_pins_with_body():
     ]
 
 
+def test_clamp_component_position_keeps_full_footprint_on_board():
+    assert clamp_component_position(4, 4, 2, 3, 5, 5) == (2, 3)
+    assert clamp_component_position(-3, -2, 2, 2, 5, 5) == (0, 0)
+    assert clamp_component_position(10, 10, 8, 8, 5, 5) == (0, 0)
+
+
+def test_selectable_item_matches_current_view_visibility():
+    front_part = Component("U1", 0, 0, 1, 1, "#fff", side="front")
+    back_part = Component("U2", 0, 0, 1, 1, "#fff", side="back")
+    hidden_group_part = Component("U3", 0, 0, 1, 1, "#fff", side="front", group="hidden")
+    front_wire = Wire("", [(0, 0), (0, 1)], "#d00000", side="front")
+    hidden_color_wire = Wire("", [(1, 0), (1, 1)], "#00aa00", side="front")
+    back_wire = Wire("", [(2, 0), (2, 1)], "#d00000", side="back")
+    current_keepout = KeepoutZone("K1", 0, 0, 1, 1, side="front")
+    back_keepout = KeepoutZone("K2", 0, 0, 1, 1, side="back")
+
+    common = {
+        "current_side": "front",
+        "hidden_groups": {"hidden"},
+        "hidden_wire_colors": {"#00aa00"},
+        "show_other_parts": True,
+        "show_other_wires": True,
+        "show_current_keepouts": True,
+        "show_other_keepouts": True,
+    }
+
+    assert is_selectable_item("component", front_part, **common)
+    assert not is_selectable_item("component", back_part, **common)
+    assert not is_selectable_item("component", hidden_group_part, **common)
+    assert is_selectable_item("wire", front_wire, **common)
+    assert not is_selectable_item("wire", hidden_color_wire, **common)
+    assert not is_selectable_item("wire", back_wire, **common)
+    assert is_selectable_item("keepout", current_keepout, **common)
+    assert not is_selectable_item("keepout", back_keepout, **common)
+    assert is_selectable_item("via", Via(2, 2, group="visible"), **common)
+    assert not is_selectable_item("keepout", current_keepout, **{**common, "show_current_keepouts": False})
+    assert is_selectable_item("component", back_part, **common, include_ghosts=True)
+
+
 def test_qt_duplicate_and_paste_selected_items(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
@@ -127,6 +167,87 @@ def test_qt_duplicate_and_paste_selected_items(monkeypatch):
         assert [component.name for component in window.layout_model.components] == ["R1", "R2", "R3", "R4"]
         assert (window.layout_model.components[2].row, window.layout_model.components[2].col) == (2, 2)
         assert (window.layout_model.components[3].row, window.layout_model.components[3].col) == (3, 3)
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_select_all_and_edge_duplicate(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.core.models import Component, ComponentPin, Wire, Via
+    from perfboard_planner.ui.qt.app import MainWindow, PinEditorDialog
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        window.board.set_layout(Layout(rows=5, cols=5))
+        window.layout_model.components.append(Component("U1", 3, 3, 2, 2, "#ffcc66"))
+        window.layout_model.wires.append(Wire("", [(0, 0), (0, 2)], "#d00000", "front"))
+        window.layout_model.wires.append(Wire("", [(1, 0), (1, 2)], "#00aa00", "front"))
+        window.layout_model.vias.append(Via(2, 2))
+        window.board.hidden_wire_colors.add("#00aa00")
+
+        window.select_all_items()
+        assert window.board.selected == {("component", 0), ("wire", 0), ("via", 0)}
+
+        window.toggle_wire_color("#d00000")
+        assert window.board.selected == {("component", 0), ("via", 0)}
+        window.toggle_wire_color("#d00000")
+
+        window.set_side("back")
+        assert window.board.selected == {("via", 0)}
+        window.set_side("front")
+
+        window.clear_selection()
+        assert window.board.selected == set()
+
+        window.swap_component_sides()
+        assert [component.side for component in window.layout_model.components] == ["back"]
+
+        window._set_board_value("rows", 6)
+        window._set_board_value("cols", 7)
+        window._set_board_value("spacing", 30)
+        assert (window.layout_model.rows, window.layout_model.cols, window.layout_model.spacing) == (6, 7, 30)
+
+        editor = PinEditorDialog(
+            Component(
+                "U1",
+                0,
+                0,
+                8,
+                13,
+                "#ffcc66",
+                pins=[ComponentPin(str(i), i, -1) for i in range(13)] + [ComponentPin(f"R{i}", i, 8) for i in range(13)],
+            )
+        )
+        try:
+            editor.refresh_grid()
+            rows, cols = editor._range()
+            expected_cells = len(rows) * len(cols)
+            assert len(editor.grid_frame.findChildren(qt_widgets.QToolButton)) == expected_cells
+            old_buttons = dict(editor.grid_buttons)
+            editor.toggle_pin_cell(0, -1)
+            assert len(editor.grid_frame.findChildren(qt_widgets.QToolButton)) == expected_cells
+            assert editor.grid_buttons == old_buttons
+            assert editor.selected_pin_name == "0"
+            editor.toggle_pin_cell(0, 0)
+            assert len(editor.grid_frame.findChildren(qt_widgets.QToolButton)) == expected_cells
+            assert editor.selected_pin_name == "P1"
+            assert editor.grid_frame.width() < 700
+            assert editor.grid_frame.height() < 700
+        finally:
+            editor.close()
+            editor.deleteLater()
+
+        window.board.selected = {("component", 0)}
+        window.duplicate_selected()
+        assert (window.layout_model.components[1].row, window.layout_model.components[1].col) == (2, 2)
+        assert window.layout_model.components[1].row + window.layout_model.components[1].height <= window.layout_model.rows
+        assert window.layout_model.components[1].col + window.layout_model.components[1].width <= window.layout_model.cols
     finally:
         window.close()
         window.deleteLater()
