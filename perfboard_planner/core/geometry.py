@@ -55,3 +55,18 @@ def point_in_rect(row: int, col: int, row1: int, col1: int, row2: int, col2: int
     lo_r, hi_r = sorted((row1, row2))
     lo_c, hi_c = sorted((col1, col2))
     return lo_r <= row <= hi_r and lo_c <= col <= hi_c
+
+
+def rotate_component_footprint_90(component) -> None:
+    """Rotate a component footprint clockwise around its top-left grid cell.
+
+    The component body swaps width/height and each pin's relative row/column is
+    transformed with it, including external pins such as DIP legs.
+    """
+    old_height = max(1, int(component.height))
+    old_width = max(1, int(component.width))
+    component.width, component.height = old_height, old_width
+    for pin in component.pins:
+        old_row, old_col = int(pin.row), int(pin.col)
+        pin.row = old_col
+        pin.col = old_height - 1 - old_row

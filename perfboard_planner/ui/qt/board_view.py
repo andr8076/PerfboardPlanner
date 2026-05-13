@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
-from ...core.geometry import board_contains, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment
+from ...core.geometry import board_contains, component_pin_absolute, display_col_for_side, logical_col_from_display, distance_to_segment, rotate_component_footprint_90
 from ...core.models import Component, ComponentPin, KeepoutZone, Layout, Via, Wire
 
 Selection = Tuple[str, int]
@@ -1542,14 +1542,15 @@ class BoardView(QWidget):
 
     def rotate_selected(self) -> None:
         comps = [idx for kind, idx in self.selected if kind == "component" and 0 <= idx < len(self.layout_model.components)]
-        if not comps:
+        unlocked = [idx for idx in comps if not self.layout_model.components[idx].locked]
+        if not unlocked:
             return
-        self.beforeLayoutChange.emit("Rotate components")
-        for idx in comps:
+        self.beforeLayoutChange.emit("Rotate component footprints")
+        for idx in unlocked:
             comp = self.layout_model.components[idx]
-            if comp.locked:
-                continue
-            comp.rotation = (int(comp.rotation) + 90) % 360
+            rotate_component_footprint_90(comp)
+            comp.row = max(0, min(self.layout_model.rows - comp.height, comp.row))
+            comp.col = max(0, min(self.layout_model.cols - comp.width, comp.col))
         self.layoutChanged.emit(); self.update()
 
     def _collection(self, kind: str):

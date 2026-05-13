@@ -1,7 +1,8 @@
 import pytest
 
 from perfboard_planner.core.commands import Command, CommandStack
-from perfboard_planner.core.models import Wire, Via
+from perfboard_planner.core.geometry import rotate_component_footprint_90
+from perfboard_planner.core.models import Component, ComponentPin, Wire, Via
 from perfboard_planner.core.storage import layout_from_dict, layout_to_dict
 from perfboard_planner.core.connectivity import build_graph, connected_nodes
 
@@ -74,6 +75,27 @@ def test_command_stack_clears_redo_history_on_new_execute():
     assert not stack.redo()
     assert [command.label for command in stack.undo_stack] == ["third"]
     assert events == ["do1", "do2", "undo2", "do3"]
+
+
+def test_rotate_component_footprint_moves_pins_with_body():
+    component = Component(
+        "U1",
+        4,
+        5,
+        4,
+        2,
+        "#ffcc66",
+        pins=[ComponentPin("A", 0, 0), ComponentPin("B", 1, 3), ComponentPin("EXT", 0, -1)],
+    )
+
+    rotate_component_footprint_90(component)
+
+    assert (component.width, component.height) == (2, 4)
+    assert [(pin.name, pin.row, pin.col) for pin in component.pins] == [
+        ("A", 0, 1),
+        ("B", 3, 0),
+        ("EXT", -1, 1),
+    ]
 
 
 def test_qt_duplicate_and_paste_selected_items(monkeypatch):

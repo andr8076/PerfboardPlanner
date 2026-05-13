@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.bom import bom_csv, bom_rows
+from ...core.geometry import rotate_component_footprint_90
 from ...core.checks import LayoutWarning, layout_warnings, pin_connection_counts
 from ...core.models import Annotation, Component, ComponentJumper, ComponentPin, Layout
 from ...core.storage import layout_from_dict, layout_to_dict, load_layout_file, save_layout_file
@@ -1316,12 +1317,23 @@ class MainWindow(QMainWindow):
         return w
 
     def _color_button(self, value: str, changed) -> QPushButton:
-        btn = QPushButton(value)
-        btn.setStyleSheet(f"background:{value}; color:{'#fff' if QColor(value).lightness()<120 else '#111'}; border-radius:8px; padding:8px;")
+        btn = QPushButton()
+        current_color = {"value": value or "#d00000"}
+
+        def apply_style(color_text: str) -> None:
+            qcolor = QColor(color_text or "#d00000")
+            fg = "#fff" if qcolor.lightness() < 120 else "#111"
+            btn.setText(color_text)
+            btn.setStyleSheet(f"background:{color_text}; color:{fg}; border-radius:8px; padding:8px;")
+
         def choose():
-            color = QColorDialog.getColor(QColor(value), self, "Choose color")
+            color = QColorDialog.getColor(QColor(current_color["value"]), self, "Choose color")
             if color.isValid():
-                changed(color.name())
+                current_color["value"] = color.name()
+                apply_style(current_color["value"])
+                changed(current_color["value"])
+
+        apply_style(current_color["value"])
         btn.clicked.connect(choose)
         return btn
 
@@ -1408,6 +1420,27 @@ class MainWindow(QMainWindow):
         self._set_dirty(True)
         self._refresh_all()
 
+    def _edit_template(self, attr: str, value) -> None:
+        setattr(self.board.new_component_template, attr, value)
+        self.board.update()
+
+    def _set_template_size(self, attr: str, value: int) -> None:
+        setattr(self.board.new_component_template, attr, max(1, int(value)))
+        self.board.update()
+
+    def rotate_template_footprint(self) -> None:
+        rotate_component_footprint_90(self.board.new_component_template)
+        self.board.update()
+        self.populate_inspector()
+
+    def rotate_component_footprint(self, component: Component) -> None:
+        def do() -> None:
+            rotate_component_footprint_90(component)
+            component.row = max(0, min(self.layout_model.rows - component.height, component.row))
+            component.col = max(0, min(self.layout_model.cols - component.width, component.col))
+
+        self._apply_change("Rotate component footprint", do)
+
     def _inspect_project_and_tools(self) -> None:
         # The inspector is contextual. Project settings are only shown in the
         # neutral Select mode with nothing selected. Tool-specific setup appears
@@ -1465,14 +1498,17 @@ class MainWindow(QMainWindow):
     def _inspect_new_component_template(self) -> None:
         _, newpart = self._card("Part mode · new component")
         t = self.board.new_component_template
-        newpart.addRow("Name", self._line(t.name, lambda v: setattr(t, "name", v)))
-        newpart.addRow("Value", self._line(t.value, lambda v: setattr(t, "value", v)))
-        newpart.addRow("Type", self._line(t.component_type, lambda v: setattr(t, "component_type", v)))
-        newpart.addRow("Category", self._combo(t.category, ["Passive", "Semiconductor", "IC", "Connector", "Module", "Custom"], lambda v: setattr(t, "category", v)))
-        newpart.addRow("Width", self._spin(t.width, 1, 100, lambda v: setattr(t, "width", v)))
-        newpart.addRow("Height", self._spin(t.height, 1, 100, lambda v: setattr(t, "height", v)))
-        newpart.addRow("Body angle", self._spin(t.rotation, 0, 359, lambda v: setattr(t, "rotation", v)))
-        newpart.addRow("Color", self._color_button(t.color, lambda v: setattr(t, "color", v)))
+        newpart.addRow("Name", self._line(t.name, lambda v: self._edit_template("name", v)))
+        newpart.addRow("Value", self._line(t.value, lambda v: self._edit_template("value", v)))
+        newpart.addRow("Type", self._line(t.component_type, lambda v: self._edit_template("component_type", v)))
+        newpart.addRow("Category", self._combo(t.category, ["Passive", "Semiconductor", "IC", "Connector", "Module", "Custom"], lambda v: self._edit_template("category", v)))
+        newpart.addRow("Width", self._spin(t.width, 1, 100, lambda v: self._set_template_size("width", v)))
+        newpart.addRow("Height", self._spin(t.height, 1, 100, lambda v: self._set_template_size("height", v)))
+        newpart.addRow("Body angle (visual)", self._spin(t.rotation, 0, 359, lambda v: self._edit_template("rotation", v)))
+        newpart.addRow("Color", self._color_button(t.color, lambda v: self._edit_template("color", v)))
+        rotate_btn = QPushButton("Rotate footprint 90°")
+        rotate_btn.clicked.connect(self.rotate_template_footprint)
+        newpart.addRow(rotate_btn)
         pins_btn = QPushButton("Edit template pins")
         pins_btn.clicked.connect(lambda: self.edit_component_pins(t, is_template=True))
         newpart.addRow(pins_btn)
@@ -1511,7 +1547,10 @@ class MainWindow(QMainWindow):
         form.addRow("Column", self._spin(comp.col + 1, 1, self.layout_model.cols, lambda v: self._apply_change("Move component", lambda: setattr(comp, "col", v-1))))
         form.addRow("Width", self._spin(comp.width, 1, 100, lambda v: self._apply_change("Resize component", lambda: setattr(comp, "width", v))))
         form.addRow("Height", self._spin(comp.height, 1, 100, lambda v: self._apply_change("Resize component", lambda: setattr(comp, "height", v))))
-        form.addRow("Body angle", self._spin(comp.rotation, 0, 359, lambda v: self._apply_change("Rotate component", lambda: setattr(comp, "rotation", v))))
+        form.addRow("Body angle (visual)", self._spin(comp.rotation, 0, 359, lambda v: self._apply_change("Rotate component body", lambda: setattr(comp, "rotation", v))))
+        footprint_btn = QPushButton("Rotate footprint 90°")
+        footprint_btn.clicked.connect(lambda: self.rotate_component_footprint(comp))
+        form.addRow(footprint_btn)
         form.addRow("Color", self._color_button(comp.color, lambda v: self._apply_change("Color component", lambda: setattr(comp, "color", v))))
         show_name = QCheckBox("Show this component name"); show_name.setChecked(comp.show_name); show_name.toggled.connect(lambda v: self._apply_change("Toggle name", lambda: setattr(comp, "show_name", bool(v))))
         show_pins = QCheckBox("Show this component's pin names"); show_pins.setChecked(comp.show_pin_names); show_pins.toggled.connect(lambda v: self._apply_change("Toggle pins", lambda: setattr(comp, "show_pin_names", bool(v))))
