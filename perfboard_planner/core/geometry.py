@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Tuple
 
 GridPoint = Tuple[int, int]
 XY = Tuple[float, float]

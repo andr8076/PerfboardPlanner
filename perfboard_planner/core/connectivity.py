@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Dict, Iterable, List, Mapping, Sequence, Set, Tuple
+from typing import Dict, List, Mapping, Sequence, Set, Tuple
 
 from .geometry import component_pin_absolute
 from .models import Component, Via, Wire

@@ -1,4 +1,5 @@
-from perfboard_planner.core.models import Component, ComponentPin, ComponentJumper, Wire, Via
+from perfboard_planner.core.commands import Command, CommandStack
+from perfboard_planner.core.models import Wire, Via
 from perfboard_planner.core.storage import layout_from_dict, layout_to_dict
 from perfboard_planner.core.connectivity import build_graph, connected_nodes
 
@@ -35,3 +36,39 @@ def test_via_links_front_and_back():
     graph = build_graph([], [], [Via(2, 3)])
     net = connected_nodes(graph, ("front", "hole", 2, 3))
     assert ("back", "hole", 2, 3) in net
+
+
+def test_storage_ignores_malformed_nested_collections():
+    layout = layout_from_dict({
+        "board": {"rows": 5, "cols": 5},
+        "components": [
+            {
+                "name": "U1",
+                "pins": [None, {"name": "A", "row": 1, "col": 2}],
+                "jumpers": [None, {"pin_a": "A", "pin_b": "missing"}],
+            },
+        ],
+        "wires": [{"points": None}],
+        "vias": None,
+    })
+
+    assert len(layout.components) == 1
+    assert [pin.name for pin in layout.components[0].pins] == ["A"]
+    assert layout.components[0].jumpers == []
+    assert layout.wires[0].points == []
+    assert layout.vias == []
+
+
+def test_command_stack_clears_redo_history_on_new_execute():
+    events = []
+    stack = CommandStack(limit=1)
+    stack.execute(Command("first", lambda: events.append("do1"), lambda: events.append("undo1")))
+    stack.execute(Command("second", lambda: events.append("do2"), lambda: events.append("undo2")))
+
+    assert [command.label for command in stack.undo_stack] == ["second"]
+    assert stack.undo()
+    stack.execute(Command("third", lambda: events.append("do3"), lambda: events.append("undo3")))
+
+    assert not stack.redo()
+    assert [command.label for command in stack.undo_stack] == ["third"]
+    assert events == ["do1", "do2", "undo2", "do3"]
