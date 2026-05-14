@@ -660,6 +660,44 @@ def test_qt_pin_editor_can_still_add_pins(monkeypatch):
         dialog.deleteLater()
         app.processEvents()
 
+
+def test_qt_route_optimize_worker_runs_without_gui_thread_widgets(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import RouteOptimizeWorker
+
+    app = QApplication.instance() or QApplication([])
+    layout = Layout(rows=5, cols=5)
+    layout.wires.append(Wire("signal", [(0, 0), (4, 4)], "#d00000", "front"))
+    worker = RouteOptimizeWorker(
+        layout_to_dict(layout),
+        {
+            "scope": "whole_board",
+            "allow_cross_side": False,
+            "allow_move_components": False,
+            "side": "front",
+            "hidden_wire_colors": set(),
+            "hidden_groups": set(),
+            "avoid_wire_overlaps": False,
+        },
+    )
+    results = []
+    errors = []
+    worker.finished.connect(results.append)
+    worker.failed.connect(errors.append)
+
+    worker.run()
+
+    assert not errors
+    assert results
+    assert results[0]["routed"] == 1
+    assert results[0]["failed"] == 0
+    assert layout_from_dict(results[0]["layout"]).wires[0].points[0] == (0, 0)
+    app.processEvents()
+
+
 def test_qt_suggest_all_can_move_unlocked_components_for_shorter_routes(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)

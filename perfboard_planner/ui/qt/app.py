@@ -7,7 +7,7 @@ from pathlib import Path
 from collections.abc import Iterable
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QPointF, QTimer
+from PySide6.QtCore import QObject, Qt, QSize, QPointF, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QPainter, QPen, QShortcut, QBrush, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,12 +48,13 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.bom import bom_csv, bom_rows
-from ...core.geometry import clamp_component_position, rotate_component_footprint_90
+from ...core.geometry import board_contains, clamp_component_position, rotate_component_footprint_90
 from ...core.checks import LayoutWarning, layout_warnings, pin_connection_counts
 from ...core.models import Annotation, Component, ComponentJumper, ComponentPin, Layout
 from ...core.selection import is_selectable_item
 from ...core.storage import layout_from_dict, layout_to_dict, load_layout_file, save_layout_file
 from .board_view import BoardView, Selection
+from .routing import BoardRoutingMixin, GridPoint
 from .style import APP_STYLESHEET
 
 
@@ -103,6 +104,131 @@ class CompactTabWidget(QTabWidget):
         return QSize(260, hint.height())
 
 
+class _NoopSignal:
+    def emit(self, *args, **kwargs) -> None:
+        return
+
+
+class _RoutingWorkerBoard(BoardRoutingMixin):
+    """Headless routing context used from a worker thread.
+
+    It mirrors the non-painting helpers that ``BoardRoutingMixin`` expects from
+    ``BoardView`` without creating QWidget instances outside the GUI thread.
+    """
+
+    def __init__(self, layout: Layout, *, side: str, hidden_wire_colors: set[str], hidden_groups: set[str], avoid_wire_overlaps: bool):
+        self.layout_model = layout
+        self.side = side
+        self.hidden_wire_colors = set(hidden_wire_colors)
+        self.hidden_groups = set(hidden_groups)
+        self.avoid_wire_overlaps = bool(avoid_wire_overlaps)
+        self.selected: set[Selection] = set()
+        self.beforeLayoutChange = _NoopSignal()
+        self.layoutChanged = _NoopSignal()
+        self.selectionChanged = _NoopSignal()
+
+    def update(self) -> None:
+        return
+
+    def _is_item_hidden_by_group(self, item) -> bool:
+        group = getattr(item, "group", "")
+        return bool(group and group in self.hidden_groups)
+
+    def _component_body_cells_at(self, comp: Component, row: int, col: int) -> set[GridPoint]:
+        return {
+            (r, c)
+            for r in range(row, row + comp.height)
+            for c in range(col, col + comp.width)
+            if board_contains(r, c, self.layout_model.rows, self.layout_model.cols)
+        }
+
+    def _component_pin_points_at(self, comp: Component, row: int, col: int) -> dict[str, GridPoint]:
+        return {pin.name: (row + pin.row, col + pin.col) for pin in comp.pins}
+
+    def _component_can_move_to(self, comp_idx: int, row: int, col: int) -> bool:
+        comp = self.layout_model.components[comp_idx]
+        if row < 0 or col < 0 or row + comp.height > self.layout_model.rows or col + comp.width > self.layout_model.cols:
+            return False
+        candidate = self._component_body_cells_at(comp, row, col)
+        for other_idx, other in enumerate(self.layout_model.components):
+            if other_idx == comp_idx or other.side != comp.side or self._is_item_hidden_by_group(other):
+                continue
+            if candidate & self._component_body_cells_at(other, other.row, other.col):
+                return False
+        for zone in self.layout_model.keepouts:
+            if self._is_item_hidden_by_group(zone) or zone.side not in {"both", comp.side}:
+                continue
+            r1, r2 = sorted((zone.row1, zone.row2)); c1, c2 = sorted((zone.col1, zone.col2))
+            for point in candidate:
+                if r1 <= point[0] <= r2 and c1 <= point[1] <= c2:
+                    return False
+        return True
+
+    def _wire_endpoint_points(self, wire) -> tuple[GridPoint, GridPoint]:
+        return wire.points[0], wire.points[-1]
+
+    def _component_pin_substitutions(self, comp: Component, old_row: int, old_col: int, new_row: int, new_col: int) -> dict[GridPoint, GridPoint]:
+        old_pins = self._component_pin_points_at(comp, old_row, old_col)
+        new_pins = self._component_pin_points_at(comp, new_row, new_col)
+        return {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+
+    def _move_wire_endpoints_for_pin_substitutions(self, side: str, substitutions: dict[GridPoint, GridPoint], *, skip_wire_indexes: set[int] | None = None) -> None:
+        if not substitutions:
+            return
+        skip_wire_indexes = skip_wire_indexes or set()
+        for wire_idx, wire in enumerate(self.layout_model.wires):
+            if wire_idx in skip_wire_indexes or wire.locked or wire.side != side or len(wire.points) < 2:
+                continue
+            updated = list(wire.points)
+            updated[0] = substitutions.get(updated[0], updated[0])
+            updated[-1] = substitutions.get(updated[-1], updated[-1])
+            wire.points = updated
+
+    def _component_has_locked_wire_endpoint(self, comp_idx: int) -> bool:
+        comp = self.layout_model.components[comp_idx]
+        pin_points = set(self._component_pin_points_at(comp, comp.row, comp.col).values())
+        for wire in self.layout_model.wires:
+            if wire.locked and wire.side == comp.side and len(wire.points) >= 2 and set(self._wire_endpoint_points(wire)) & pin_points:
+                return True
+        return False
+
+
+class RouteOptimizeWorker(QObject):
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, layout_data: dict, options: dict):
+        super().__init__()
+        self.layout_data = layout_data
+        self.options = options
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            layout = layout_from_dict(self.layout_data)
+            board = _RoutingWorkerBoard(
+                layout,
+                side=self.options["side"],
+                hidden_wire_colors=set(self.options.get("hidden_wire_colors", set())),
+                hidden_groups=set(self.options.get("hidden_groups", set())),
+                avoid_wire_overlaps=bool(self.options.get("avoid_wire_overlaps", False)),
+            )
+            routed, failed, vias, moved = board.optimize_wire_routes(
+                scope=self.options.get("scope", "current_side"),
+                allow_cross_side=bool(self.options.get("allow_cross_side", False)),
+                allow_move_components=bool(self.options.get("allow_move_components", False)),
+            )
+            self.finished.emit({
+                "layout": layout_to_dict(board.layout_model),
+                "routed": routed,
+                "failed": failed,
+                "vias": vias,
+                "moved": moved,
+            })
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -123,6 +249,9 @@ class MainWindow(QMainWindow):
         self._building_inspector = False
         self._warnings: list[LayoutWarning] = []
         self.muted_warning_signatures: set[str] = set()
+        self._route_thread: QThread | None = None
+        self._route_worker: RouteOptimizeWorker | None = None
+        self._route_job_state: dict | None = None
         self._build_ui()
         self._wire_events()
         self.autosave_timer = QTimer(self)
@@ -680,6 +809,10 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._route_thread is not None:
+            QMessageBox.information(self, "Suggest all running", "Wait for background route optimization to finish before closing.")
+            event.ignore()
+            return
         if self.confirm_discard_unsaved():
             event.accept()
         else:
@@ -1971,16 +2104,78 @@ class MainWindow(QMainWindow):
         self.populate_inspector()
         self.statusBar().showMessage(f"Loaded template: {data.get('label', item.text())}")
 
+    def _set_route_optimize_running(self, running: bool) -> None:
+        for action in (self.optimize_current_side_action, self.optimize_whole_board_action, self.optimize_with_vias_action, self.optimize_move_parts_action):
+            action.setEnabled(not running)
+        self.footer_optimize_button.setEnabled(not running)
+        self.footer_route_button.setEnabled(not running)
+        self.footer_no_overlap_button.setEnabled(not running)
+
     def optimize_wire_routes(self, scope: str, allow_cross_side: bool, allow_move_components: bool = False) -> None:
+        if self._route_thread is not None:
+            self.statusBar().showMessage("Suggest all is already running in the background.")
+            return
+
         before = layout_to_dict(self.layout_model)
-        was_dirty = self.is_dirty
-        undo_len = len(self.undo_stack)
-        routed, failed, vias, moved = self.board.optimize_wire_routes(scope=scope, allow_cross_side=allow_cross_side, allow_move_components=allow_move_components)
-        self._refresh_all()
+        self._route_job_state = {
+            "before": before,
+            "was_dirty": self.is_dirty,
+            "undo_len": len(self.undo_stack),
+            "scope": scope,
+        }
+        options = {
+            "scope": scope,
+            "allow_cross_side": allow_cross_side,
+            "allow_move_components": allow_move_components,
+            "side": self.board.side,
+            "hidden_wire_colors": set(self.board.hidden_wire_colors),
+            "hidden_groups": set(self.board.hidden_groups),
+            "avoid_wire_overlaps": self.board.avoid_wire_overlaps,
+        }
+        self._set_route_optimize_running(True)
         scope_text = "current side" if scope == "current_side" else "whole board"
+        self.statusBar().showMessage(f"Suggest all is optimizing the {scope_text} in the background…")
+
+        self._route_thread = QThread(self)
+        self._route_worker = RouteOptimizeWorker(before, options)
+        self._route_worker.moveToThread(self._route_thread)
+        self._route_thread.started.connect(self._route_worker.run)
+        self._route_worker.finished.connect(self._route_optimize_finished)
+        self._route_worker.failed.connect(self._route_optimize_failed)
+        self._route_worker.finished.connect(self._route_thread.quit)
+        self._route_worker.failed.connect(self._route_thread.quit)
+        self._route_worker.finished.connect(self._route_worker.deleteLater)
+        self._route_worker.failed.connect(self._route_worker.deleteLater)
+        self._route_thread.finished.connect(self._route_thread.deleteLater)
+        self._route_thread.finished.connect(self._route_optimize_cleanup)
+        self._route_thread.start()
+
+    @Slot(dict)
+    def _route_optimize_finished(self, result: dict) -> None:
+        state = self._route_job_state or {}
+        before = state.get("before", layout_to_dict(self.layout_model))
+        was_dirty = bool(state.get("was_dirty", self.is_dirty))
+        undo_len = int(state.get("undo_len", len(self.undo_stack)))
+        scope = str(state.get("scope", "current_side"))
+        scope_text = "current side" if scope == "current_side" else "whole board"
+        routed = int(result.get("routed", 0))
+        failed = int(result.get("failed", 0))
+        vias = int(result.get("vias", 0))
+        moved = int(result.get("moved", 0))
+
+        if layout_to_dict(self.layout_model) != before:
+            self.statusBar().showMessage("Suggest all finished, but the board changed while it was running; result discarded.")
+            QMessageBox.information(
+                self,
+                "Suggest all result discarded",
+                "The board changed while background route optimization was running, so the suggested result was discarded. Run Suggest all again when you are ready.",
+            )
+            return
+
         if routed == 0 and failed == 0 and moved == 0:
             self.statusBar().showMessage(f"No unlocked wires or movable components to optimize on the {scope_text}.")
             return
+
         parts = [f"optimized {routed} wire{'s' if routed != 1 else ''}"]
         if vias:
             parts.append(f"added {vias} via{'s' if vias != 1 else ''}")
@@ -1989,7 +2184,13 @@ class MainWindow(QMainWindow):
         if moved:
             parts.append(f"moved {moved} component{'s' if moved != 1 else ''}")
         summary = "Suggest all: " + ", ".join(parts) + "."
+
         if routed or vias or moved:
+            self.push_undo("Suggest all wires")
+            self.layout_model = layout_from_dict(result["layout"])
+            self.board.set_layout(self.layout_model)
+            self._set_dirty(True)
+            self._refresh_all()
             reply = QMessageBox.question(
                 self,
                 "Review suggested routing",
@@ -2006,6 +2207,17 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Suggest all rejected; previous routing restored.")
                 return
         self.statusBar().showMessage(summary)
+
+    @Slot(str)
+    def _route_optimize_failed(self, message: str) -> None:
+        self.statusBar().showMessage(f"Suggest all failed: {message}")
+        QMessageBox.warning(self, "Suggest all failed", message)
+
+    def _route_optimize_cleanup(self) -> None:
+        self._route_thread = None
+        self._route_worker = None
+        self._route_job_state = None
+        self._set_route_optimize_running(False)
 
     def start_route_suggestion(self) -> None:
         self.set_tool("wire")
