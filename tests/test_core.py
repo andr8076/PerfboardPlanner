@@ -1,7 +1,7 @@
 import pytest
 
 from perfboard_planner.core.commands import Command, CommandStack
-from perfboard_planner.core.geometry import clamp_component_position, rotate_component_footprint_90
+from perfboard_planner.core.geometry import clamp_component_position, component_pin_absolute, rotate_component_footprint_90
 from perfboard_planner.core.models import Component, ComponentPin, KeepoutZone, Layout, Wire, Via
 from perfboard_planner.core.storage import layout_from_dict, layout_to_dict
 from perfboard_planner.core.selection import is_selectable_item
@@ -172,6 +172,270 @@ def test_qt_duplicate_and_paste_selected_items(monkeypatch):
         window.deleteLater()
         app.processEvents()
 
+def test_qt_unsaved_prompt_saves_before_continuing(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+    QMessageBox = qt_widgets.QMessageBox
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        window._set_dirty(True)
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *args, **kwargs: QMessageBox.StandardButton.Save,
+        )
+        saved = []
+        monkeypatch.setattr(window, "save_file", lambda: saved.append(True) or True)
+
+        assert window.confirm_discard_unsaved()
+        assert saved == [True]
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_suggest_route_can_use_other_side_when_enabled(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=5, cols=5)
+        layout.components.append(Component("Wall", 0, 2, 1, 5, "#ffcc66", side="front"))
+        window.board.set_layout(layout)
+        window.board.side = "front"
+
+        assert window.board._suggest_route((2, 0), (2, 4)) == []
+
+        window.board.allow_route_suggestion_cross_side = True
+        window.board._handle_route_suggestion_click((2, 0))
+        window.board._handle_route_suggestion_click((2, 4))
+
+        assert len(window.layout_model.vias) == 2
+        assert [wire.side for wire in window.layout_model.wires] == ["front", "back", "front"]
+        assert window.board.selected == {("wire", 0), ("wire", 1), ("wire", 2)}
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_suggest_all_prioritizes_constrained_wires(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=5, cols=5)
+        layout.components.extend([
+            Component("B1", 1, 0, 1, 1, "#ffcc66", side="front"),
+            Component("B2", 2, 1, 1, 1, "#ffcc66", side="front"),
+            Component("B3", 3, 0, 1, 1, "#ffcc66", side="front"),
+        ])
+        constrained = Wire("constrained", [(2, 0), (2, 4)], "#d00000", "front")
+        open_wire = Wire("open", [(0, 0), (4, 4)], "#00aa00", "front")
+        layout.wires.extend([open_wire, constrained])
+        window.board.set_layout(layout)
+
+        priorities = [window.board._wire_route_priority(wire) for wire in layout.wires]
+        assert priorities[1] < priorities[0]
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_solderability_cost_prefers_straight_and_via_free_routes(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        wire = Wire("signal", [(0, 0), (0, 4)], "#d00000", "front")
+        straight = [(0, 0), (0, 4)]
+        bent = [(0, 0), (1, 0), (1, 4), (0, 4)]
+
+        assert window.board._route_cost(straight, wire) < window.board._route_cost(bent, wire)
+        assert window.board._route_cost(straight, wire) < window.board._route_cost(straight, wire, via_count=2)
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_route_priority_orders_rails_constrained_local_then_flexible(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=12, cols=20)
+        layout.components.extend([
+            Component("C1", 4, 0, 1, 1, "#ffcc66", side="front"),
+            Component("C2", 5, 1, 1, 1, "#ffcc66", side="front"),
+            Component("C3", 6, 0, 1, 1, "#ffcc66", side="front"),
+        ])
+        window.board.set_layout(layout)
+
+        rail = Wire("GND rail", [(0, 0), (0, 18)], "#111111", "front")
+        constrained = Wire("signal", [(5, 0), (5, 8)], "#d00000", "front")
+        local = Wire("local", [(8, 2), (8, 4)], "#d00000", "front")
+        flexible = Wire("flex", [(2, 2), (10, 15)], "#d00000", "front")
+
+        priorities = [window.board._wire_route_priority(wire)[0] for wire in [rail, constrained, local, flexible]]
+        assert priorities == [0, 1, 2, 3]
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_suggest_all_can_reorder_same_net_chain(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=5, cols=5)
+        layout.components.append(Component("Wall", 0, 2, 1, 4, "#ffcc66", side="front"))
+        a = (0, 0)
+        b = (0, 4)
+        c = (4, 4)
+        layout.wires.extend([
+            Wire("net", [a, b], "#d00000", "front"),
+            Wire("net", [b, c], "#d00000", "front"),
+        ])
+        window.board.set_layout(layout)
+
+        routed, failed, vias, moved = window.board.optimize_wire_routes(scope="current_side", allow_cross_side=False)
+
+        assert (routed, failed, vias, moved) == (2, 0, 0, 0)
+        endpoint_pairs = {frozenset((wire.points[0], wire.points[-1])) for wire in window.layout_model.wires}
+        assert endpoint_pairs == {frozenset((a, c)), frozenset((b, c))}
+        assert frozenset((a, b)) not in endpoint_pairs
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_suggest_route_avoids_existing_wire_cells(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=5, cols=5)
+        existing = Wire("existing", [(2, 0), (2, 3)], "#00aa00", "front")
+        layout.wires.append(existing)
+        window.board.set_layout(layout)
+        window.board.side = "front"
+
+        route = window.board._suggest_route((0, 0), (4, 4))
+        occupied = window.board._route_cells(existing.points)
+
+        assert route
+        assert window.board._route_cells(route).isdisjoint(occupied)
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_suggest_all_can_move_unlocked_components_for_shorter_routes(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=8, cols=12)
+        fixed = Component("A", 1, 1, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+        movable = Component("B", 1, 10, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)])
+        layout.components.extend([fixed, movable])
+        layout.wires.append(Wire("signal", [(1, 1), (1, 10)], "#d00000", "front"))
+        window.board.set_layout(layout)
+
+        routed, failed, vias, moved = window.board.optimize_wire_routes(scope="whole_board", allow_cross_side=False, allow_move_components=True)
+
+        assert (routed, failed, vias, moved) == (1, 0, 0, 1)
+        assert (layout.components[0].row, layout.components[0].col) == (1, 1)
+        assert (layout.components[1].row, layout.components[1].col) != (1, 10)
+        assert layout.wires[0].points[-1] == component_pin_absolute(layout.components[1], layout.components[1].pins[0])
+        assert window.board._route_cost(layout.wires[0].points, layout.wires[0]) < window.board._route_cost([(1, 1), (1, 10)], layout.wires[0])
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_suggest_all_does_not_move_locked_components(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=8, cols=12)
+        a = Component("A", 1, 1, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+        b = Component("B", 1, 10, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+        layout.components.extend([a, b])
+        layout.wires.append(Wire("signal", [(1, 1), (1, 10)], "#d00000", "front"))
+        window.board.set_layout(layout)
+
+        _, _, _, moved = window.board.optimize_wire_routes(scope="whole_board", allow_cross_side=False, allow_move_components=True)
+
+        assert moved == 0
+        assert [(component.row, component.col) for component in layout.components] == [(1, 1), (1, 10)]
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
 
 def test_qt_select_all_and_edge_duplicate(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")

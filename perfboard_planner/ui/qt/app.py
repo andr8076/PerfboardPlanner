@@ -189,23 +189,25 @@ class MainWindow(QMainWindow):
         footer_layout.addStretch(1)
         self.footer_route_button = QToolButton()
         self.footer_route_button.setText("Suggest route")
-        self.footer_route_button.setToolTip("Click, then choose start and destination holes on the board")
+        self.footer_route_button.setToolTip("Click, then choose start and destination holes on the board. Enable cross-side suggestions in Wire mode to let it add vias.")
         self.footer_route_button.setVisible(False)
         footer_layout.addWidget(self.footer_route_button)
 
         self.footer_optimize_button = QToolButton()
         self.footer_optimize_button.setText("Suggest all")
-        self.footer_optimize_button.setToolTip("Reroute existing wires while keeping their endpoints")
+        self.footer_optimize_button.setToolTip("Draw direct endpoint wires first, then reroute them into solder-friendly paths while keeping endpoints")
         self.footer_optimize_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.footer_optimize_button.setVisible(False)
         optimize_menu = QMenu(self.footer_optimize_button)
         self.optimize_current_side_action = QAction("Optimize current side", self)
         self.optimize_whole_board_action = QAction("Optimize whole board", self)
         self.optimize_with_vias_action = QAction("Optimize whole board + allow vias", self)
+        self.optimize_move_parts_action = QAction("Optimize whole board + vias + move unlocked parts", self)
         optimize_menu.addAction(self.optimize_current_side_action)
         optimize_menu.addAction(self.optimize_whole_board_action)
         optimize_menu.addSeparator()
         optimize_menu.addAction(self.optimize_with_vias_action)
+        optimize_menu.addAction(self.optimize_move_parts_action)
         self.footer_optimize_button.setMenu(optimize_menu)
         footer_layout.addWidget(self.footer_optimize_button)
         footer_layout.addStretch(1)
@@ -495,6 +497,7 @@ class MainWindow(QMainWindow):
         self.optimize_current_side_action.triggered.connect(lambda: self.optimize_wire_routes("current_side", False))
         self.optimize_whole_board_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", False))
         self.optimize_with_vias_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", True))
+        self.optimize_move_parts_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", True, True))
         self.library_list.itemDoubleClicked.connect(self.apply_library_preset)
         self.group_list.itemClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
         self.group_list.itemDoubleClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
@@ -653,12 +656,18 @@ class MainWindow(QMainWindow):
             return True
         reply = QMessageBox.question(
             self,
-            "Unsaved changes",
-            "This layout has unsaved changes. Continue and discard them?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            "Save changes?",
+            "This layout has unsaved changes. Do you want to save them before continuing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
         )
-        return reply == QMessageBox.StandardButton.Yes
+        if reply == QMessageBox.StandardButton.Save:
+            return self.save_file()
+        if reply == QMessageBox.StandardButton.Discard:
+            return True
+        return False
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.confirm_discard_unsaved():
@@ -716,9 +725,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
 
-    def save_file(self) -> None:
+    def save_file(self) -> bool:
         if not self.current_path:
-            self.save_file_as(); return
+            return self.save_file_as()
         try:
             save_layout_file(self.current_path, self.layout_model)
             self._set_dirty(False)
@@ -728,17 +737,19 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.statusBar().showMessage(f"Saved {self.current_path}")
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
-
-    def save_file_as(self) -> None:
+            return False
+    
+    def save_file_as(self) -> bool:
         path, _ = QFileDialog.getSaveFileName(self, "Save layout", "", "JSON layout (*.json);;All files (*.*)")
         if not path:
-            return
+            return False
         if not path.lower().endswith(".json"):
             path += ".json"
         self.current_path = Path(path)
-        self.save_file()
+        return self.save_file()
 
     def safe_delete_selected(self) -> None:
         selected = list(self.board.selected)
@@ -1729,10 +1740,19 @@ class MainWindow(QMainWindow):
     def _inspect_new_wire_tool(self) -> None:
         _, wire = self._card("Wire mode")
         wire.addRow("Color", self._wire_color_selector(self.board.current_wire_color, self._set_current_wire_color))
-        hint = QLabel("Use the bottom-bar Suggest route button, then click two board holes or pins.")
+        cross_side = QCheckBox("Allow Suggest route to use vias and the other side")
+        cross_side.setChecked(self.board.allow_route_suggestion_cross_side)
+        cross_side.toggled.connect(self._set_route_suggestion_cross_side)
+        wire.addRow(cross_side)
+        hint = QLabel("Use the bottom-bar Suggest route button, then click two board holes or pins. When cross-side routing is enabled, the suggestion may add vias and a same-color segment on the opposite side if that route is shorter or safer.")
         hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
         wire.addRow(hint)
 
+    def _set_route_suggestion_cross_side(self, value: bool) -> None:
+        self.board.allow_route_suggestion_cross_side = bool(value)
+        mode = "may use vias and the other side" if value else "stays on the current side"
+        self.statusBar().showMessage(f"Suggest route {mode}.")
 
     def _inspect_new_keepout_tool(self) -> None:
         _, keepout = self._card("Keepout mode")
@@ -1928,23 +1948,25 @@ class MainWindow(QMainWindow):
         self.populate_inspector()
         self.statusBar().showMessage(f"Loaded template: {data.get('label', item.text())}")
 
-    def optimize_wire_routes(self, scope: str, allow_cross_side: bool) -> None:
+    def optimize_wire_routes(self, scope: str, allow_cross_side: bool, allow_move_components: bool = False) -> None:
         before = layout_to_dict(self.layout_model)
         was_dirty = self.is_dirty
         undo_len = len(self.undo_stack)
-        routed, failed, vias = self.board.optimize_wire_routes(scope=scope, allow_cross_side=allow_cross_side)
+        routed, failed, vias, moved = self.board.optimize_wire_routes(scope=scope, allow_cross_side=allow_cross_side, allow_move_components=allow_move_components)
         self._refresh_all()
         scope_text = "current side" if scope == "current_side" else "whole board"
-        if routed == 0 and failed == 0:
-            self.statusBar().showMessage(f"No unlocked wires to optimize on the {scope_text}.")
+        if routed == 0 and failed == 0 and moved == 0:
+            self.statusBar().showMessage(f"No unlocked wires or movable components to optimize on the {scope_text}.")
             return
         parts = [f"optimized {routed} wire{'s' if routed != 1 else ''}"]
         if vias:
             parts.append(f"added {vias} via{'s' if vias != 1 else ''}")
         if failed:
             parts.append(f"{failed} could not be safely routed")
+        if moved:
+            parts.append(f"moved {moved} component{'s' if moved != 1 else ''}")
         summary = "Suggest all: " + ", ".join(parts) + "."
-        if routed or vias:
+        if routed or vias or moved:
             reply = QMessageBox.question(
                 self,
                 "Review suggested routing",
@@ -1973,7 +1995,8 @@ class MainWindow(QMainWindow):
             return
         self.board.start_route_suggestion()
         self.update_route_button()
-        self.statusBar().showMessage("Suggest route: click the start hole, then the destination hole.")
+        suffix = " It may add vias and use the other side." if self.board.allow_route_suggestion_cross_side else ""
+        self.statusBar().showMessage(f"Suggest route: click the start hole, then the destination hole.{suffix}")
 
     def suggest_route_dialog(self) -> None:
         # Backwards-compatible alias for older UI hookups.
@@ -2386,11 +2409,14 @@ class PinEditorDialog(QDialog):
 
 
 def run() -> None:
+    print("Perfboard Planner: initializing Qt application.", flush=True)
     app = QApplication(sys.argv)
     app.setApplicationName("Perfboard Planner")
     app.setStyleSheet(APP_STYLESHEET)
+    print("Perfboard Planner: building main window.", flush=True)
     window = MainWindow()
     window.show()
+    print("Perfboard Planner: main window is open.", flush=True)
     sys.exit(app.exec())
 
 
