@@ -3224,14 +3224,20 @@ class PerfboardPlanner(tk.Tk):
                 dr, dc = self.clamp_delta_for_bounds((min(rows), min(cols), max(rows), max(cols)), dr, dc)
 
         changed = False
+        substitutions_by_side: Dict[str, Dict[Tuple[int, int], Tuple[int, int]]] = {}
+        selected_wire_indexes = set(getattr(self, "drag_wire_originals", {}).keys())
         for index, (orig_row, orig_col) in self.drag_component_originals.items():
             if not (0 <= index < len(self.components)):
                 continue
             comp = self.components[index]
+            old_row, old_col = comp.row, comp.col
             new_row = orig_row + dr
             new_col = orig_col + dc
             if (comp.row, comp.col) != (new_row, new_col):
                 comp.row, comp.col = new_row, new_col
+                substitutions_by_side.setdefault(comp.side, {}).update(
+                    self.component_pin_substitutions(comp, old_row, old_col, comp.row, comp.col)
+                )
                 changed = True
         for index, pts in self.drag_wire_originals.items():
             if not (0 <= index < len(self.wires)):
@@ -3239,6 +3245,9 @@ class PerfboardPlanner(tk.Tk):
             new_pts = [(r + dr, c + dc) for r, c in pts]
             if self.wires[index].points != new_pts:
                 self.wires[index].points = new_pts
+                changed = True
+        for side, substitutions in substitutions_by_side.items():
+            if self.move_wire_endpoints_for_pin_substitutions(side, substitutions, selected_wire_indexes):
                 changed = True
         if changed:
             self.redraw()
@@ -3460,7 +3469,32 @@ class PerfboardPlanner(tk.Tk):
         self.clipboard_paste_count = 0
         return self.paste_component()
 
+    def component_pin_points_at(self, comp: Component, row: int, col: int) -> Dict[str, Tuple[int, int]]:
+        return {pin.name: (int(row + pin.row), int(col + pin.col)) for pin in self.normalized_pins(comp.pins, comp.width, comp.height)}
+
+    def component_pin_substitutions(self, comp: Component, old_row: int, old_col: int, new_row: int, new_col: int) -> Dict[Tuple[int, int], Tuple[int, int]]:
+        old_pins = self.component_pin_points_at(comp, old_row, old_col)
+        new_pins = self.component_pin_points_at(comp, new_row, new_col)
+        return {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+
+    def move_wire_endpoints_for_pin_substitutions(self, side: str, substitutions: Dict[Tuple[int, int], Tuple[int, int]], skip_wire_indexes: Optional[set] = None) -> bool:
+        if not substitutions:
+            return False
+        skip_wire_indexes = skip_wire_indexes or set()
+        changed = False
+        for index, wire in enumerate(self.wires):
+            if index in skip_wire_indexes or getattr(wire, "locked", False) or wire.side != side or len(wire.points) < 2:
+                continue
+            updated = list(wire.points)
+            updated[0] = substitutions.get(updated[0], updated[0])
+            updated[-1] = substitutions.get(updated[-1], updated[-1])
+            if updated != wire.points:
+                wire.points = updated
+                changed = True
+        return changed
+
     def rotate_component_90_clockwise(self, comp: Component):
+        old_pin_points = self.component_pin_points_at(comp, comp.row, comp.col)
         old_h = int(comp.height)
         old_w = int(comp.width)
         new_pins = []
@@ -3471,6 +3505,9 @@ class PerfboardPlanner(tk.Tk):
         comp.pins = self.normalized_pins(new_pins, comp.width, comp.height)
         comp.jumpers = self.normalized_jumpers(comp.jumpers, comp.pins)
         comp.row, comp.col = self.clamp_component_position(comp, comp.row, comp.col)
+        new_pin_points = self.component_pin_points_at(comp, comp.row, comp.col)
+        substitutions = {old_pin_points[name]: new_pin_points[name] for name in old_pin_points.keys() & new_pin_points.keys()}
+        self.move_wire_endpoints_for_pin_substitutions(comp.side, substitutions)
 
     def rotate_selected_components(self, event=None):
         if event is not None and self.event_from_text_input(event):

@@ -979,6 +979,36 @@ class BoardView(QWidget):
     def _wire_endpoint_points(self, wire: Wire) -> tuple[GridPoint, GridPoint]:
         return wire.points[0], wire.points[-1]
 
+    def _component_pin_substitutions(
+        self,
+        comp: Component,
+        old_row: int,
+        old_col: int,
+        new_row: int,
+        new_col: int,
+    ) -> dict[GridPoint, GridPoint]:
+        old_pins = self._component_pin_points_at(comp, old_row, old_col)
+        new_pins = self._component_pin_points_at(comp, new_row, new_col)
+        return {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+
+    def _move_wire_endpoints_for_pin_substitutions(
+        self,
+        side: str,
+        substitutions: dict[GridPoint, GridPoint],
+        *,
+        skip_wire_indexes: set[int] | None = None,
+    ) -> None:
+        if not substitutions:
+            return
+        skip_wire_indexes = skip_wire_indexes or set()
+        for wire_idx, wire in enumerate(self.layout_model.wires):
+            if wire_idx in skip_wire_indexes or wire.locked or wire.side != side or len(wire.points) < 2:
+                continue
+            updated = list(wire.points)
+            updated[0] = substitutions.get(updated[0], updated[0])
+            updated[-1] = substitutions.get(updated[-1], updated[-1])
+            wire.points = updated
+
     def _component_has_locked_wire_endpoint(self, comp_idx: int) -> bool:
         comp = self.layout_model.components[comp_idx]
         pin_points = set(self._component_pin_points_at(comp, comp.row, comp.col).values())
@@ -1007,18 +1037,10 @@ class BoardView(QWidget):
 
     def _apply_component_move_for_routes(self, comp_idx: int, row: int, col: int) -> None:
         comp = self.layout_model.components[comp_idx]
-        old_pins = self._component_pin_points_at(comp, comp.row, comp.col)
-        new_pins = self._component_pin_points_at(comp, row, col)
-        substitutions = {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+        substitutions = self._component_pin_substitutions(comp, comp.row, comp.col, row, col)
         comp.row = row
         comp.col = col
-        for wire in self.layout_model.wires:
-            if wire.side != comp.side or len(wire.points) < 2:
-                continue
-            updated = list(wire.points)
-            updated[0] = substitutions.get(updated[0], updated[0])
-            updated[-1] = substitutions.get(updated[-1], updated[-1])
-            wire.points = updated
+        self._move_wire_endpoints_for_pin_substitutions(comp.side, substitutions)
 
     def _move_unlocked_components_for_routes(self, target_indexes: set[int], scope: str) -> int:
         target_sides = {self.side} if scope == "current_side" else {"front", "back"}
@@ -2009,6 +2031,7 @@ class BoardView(QWidget):
         self.beforeLayoutChange.emit("Rotate component footprints")
         for idx in unlocked:
             comp = self.layout_model.components[idx]
+            old_pins = self._component_pin_points_at(comp, comp.row, comp.col)
             rotate_component_footprint_90(comp)
             comp.row, comp.col = clamp_component_position(
                 comp.row,
@@ -2018,6 +2041,9 @@ class BoardView(QWidget):
                 self.layout_model.rows,
                 self.layout_model.cols,
             )
+            new_pins = self._component_pin_points_at(comp, comp.row, comp.col)
+            substitutions = {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+            self._move_wire_endpoints_for_pin_substitutions(comp.side, substitutions)
         self.layoutChanged.emit(); self.update()
 
     def _collection(self, kind: str):
@@ -2056,6 +2082,8 @@ class BoardView(QWidget):
                 self.drag_originals[sel] = (item.row1, item.col1, item.row2, item.col2)
 
     def _apply_drag_delta(self, dr: int, dc: int) -> None:
+        substitutions_by_side: dict[str, dict[GridPoint, GridPoint]] = {}
+        selected_wire_indexes = {idx for kind, idx in self.drag_originals if kind == "wire"}
         for sel, original in self.drag_originals.items():
             collection = self._collection(sel[0])
             if collection is None or not (0 <= sel[1] < len(collection)):
@@ -2063,6 +2091,7 @@ class BoardView(QWidget):
             item = collection[sel[1]]
             if sel[0] == "component":
                 row, col = original
+                old_row, old_col = item.row, item.col
                 item.row, item.col = clamp_component_position(
                     row + dr,
                     col + dc,
@@ -2070,6 +2099,9 @@ class BoardView(QWidget):
                     item.height,
                     self.layout_model.rows,
                     self.layout_model.cols,
+                )
+                substitutions_by_side.setdefault(item.side, {}).update(
+                    self._component_pin_substitutions(item, old_row, old_col, item.row, item.col)
                 )
             elif sel[0] == "wire":
                 item.points = [(max(0, min(self.layout_model.rows-1, r+dr)), max(0, min(self.layout_model.cols-1, c+dc))) for r, c in original]
@@ -2088,3 +2120,9 @@ class BoardView(QWidget):
                 cc1, cc2 = new_min_c, new_min_c + width
                 item.row1, item.row2 = (rr1, rr2) if r1 <= r2 else (rr2, rr1)
                 item.col1, item.col2 = (cc1, cc2) if c1 <= c2 else (cc2, cc1)
+        for side, substitutions in substitutions_by_side.items():
+            self._move_wire_endpoints_for_pin_substitutions(
+                side,
+                substitutions,
+                skip_wire_indexes=selected_wire_indexes,
+            )

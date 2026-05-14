@@ -379,6 +379,81 @@ def test_qt_suggest_route_avoids_existing_wire_cells(monkeypatch):
         app.processEvents()
 
 
+
+
+def test_qt_rotate_component_moves_attached_wire_endpoints(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.board_view import BoardView
+
+    app = QApplication.instance() or QApplication([])
+    board = BoardView()
+    try:
+        component = Component(
+            "U1",
+            2,
+            2,
+            3,
+            2,
+            "#ffcc66",
+            side="front",
+            pins=[ComponentPin("A", 0, 0), ComponentPin("B", 1, 2)],
+        )
+        layout = Layout(rows=8, cols=8, components=[component])
+        layout.wires.append(Wire("signal", [(2, 2), (6, 6)], "#d00000", "front"))
+        layout.wires.append(Wire("other", [(0, 0), (6, 6)], "#00aa00", "front"))
+        board.set_layout(layout)
+        board.selected = {("component", 0)}
+
+        board.rotate_selected()
+
+        assert (component.width, component.height) == (2, 3)
+        assert layout.wires[0].points == [(2, 3), (6, 6)]
+        assert layout.wires[1].points == [(0, 0), (6, 6)]
+    finally:
+        board.close()
+        board.deleteLater()
+        app.processEvents()
+
+
+def test_qt_drag_component_moves_attached_wire_endpoints(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.board_view import BoardView
+
+    app = QApplication.instance() or QApplication([])
+    board = BoardView()
+    try:
+        component = Component(
+            "U1",
+            1,
+            1,
+            2,
+            2,
+            "#ffcc66",
+            side="front",
+            pins=[ComponentPin("A", 0, 0), ComponentPin("B", 1, 1)],
+        )
+        layout = Layout(rows=8, cols=8, components=[component])
+        layout.wires.append(Wire("signal", [(1, 1), (5, 5)], "#d00000", "front"))
+        board.set_layout(layout)
+        board.selected = {("component", 0)}
+        board._cache_drag_originals()
+
+        board._apply_drag_delta(2, 3)
+
+        assert (component.row, component.col) == (3, 4)
+        assert layout.wires[0].points == [(3, 4), (5, 5)]
+    finally:
+        board.close()
+        board.deleteLater()
+        app.processEvents()
+
+
 def test_qt_suggest_all_can_move_unlocked_components_for_shorter_routes(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
