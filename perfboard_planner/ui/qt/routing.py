@@ -7,6 +7,7 @@ from ...core.geometry import board_contains, component_pin_absolute
 from ...core.models import Via, Wire
 
 GridPoint = Tuple[int, int]
+RouteEdge = Tuple[GridPoint, GridPoint]
 
 
 class BoardRoutingMixin:
@@ -27,6 +28,23 @@ class BoardRoutingMixin:
             step = 1 if br >= ar else -1
             return [(r, ac) for r in range(ar, br + step, step)]
         return [a, b]
+
+    @staticmethod
+    def _route_edge(a: GridPoint, b: GridPoint) -> RouteEdge:
+        return (a, b) if a <= b else (b, a)
+
+    def _segment_grid_edges(self, a: GridPoint, b: GridPoint) -> set[RouteEdge]:
+        points = self._segment_grid_points(a, b)
+        return {self._route_edge(x, y) for x, y in zip(points, points[1:])}
+
+    def _wire_edges_from_wires(self, wires: Iterable[Wire], side: str) -> set[RouteEdge]:
+        occupied: set[RouteEdge] = set()
+        for wire in wires:
+            if wire.side != side or wire.color in self.hidden_wire_colors or self._is_item_hidden_by_group(wire):
+                continue
+            for a, b in zip(wire.points, wire.points[1:]):
+                occupied.update(self._segment_grid_edges(a, b))
+        return occupied
 
     def _route_blocked_cells_for_side(self, side: str, start: GridPoint, end: GridPoint) -> set[GridPoint]:
         """Cells that an autorouted wire must never pass through on one side.
@@ -92,6 +110,19 @@ class BoardRoutingMixin:
                         occupied.add(pt)
         return occupied
 
+
+    def _route_wire_edges_for_side(self, side: str, *, ignore_wire_indexes: Optional[set[int]] = None, extra_occupied: Optional[set[RouteEdge]] = None) -> set[RouteEdge]:
+        occupied: set[RouteEdge] = set(extra_occupied or set())
+        ignore_wire_indexes = ignore_wire_indexes or set()
+        for i, wire in enumerate(self.layout_model.wires):
+            if i in ignore_wire_indexes:
+                continue
+            if wire.side != side or wire.color in self.hidden_wire_colors or self._is_item_hidden_by_group(wire):
+                continue
+            for a, b in zip(wire.points, wire.points[1:]):
+                occupied.update(self._segment_grid_edges(a, b))
+        return occupied
+
     def _route_wire_cells(self) -> set[GridPoint]:
         return self._route_wire_cells_for_side(self.side)
 
@@ -150,12 +181,14 @@ class BoardRoutingMixin:
         *,
         ignore_wire_indexes: Optional[set[int]] = None,
         extra_occupied: Optional[set[GridPoint]] = None,
+        extra_occupied_edges: Optional[set[RouteEdge]] = None,
     ) -> list[GridPoint]:
         """Find a safe orthogonal route without runaway memory use.
 
-        Component bodies, keepout cells, and already-routed wire cells are hard
-        blocks, except for the two explicit endpoints. This keeps generated
-        wires from being stacked on top of existing wires.
+        Component bodies and keepout cells are hard blocks, except for the two
+        explicit endpoints. Existing wire cells are a soft cost by default; when
+        no-overlap mode is enabled, same-direction occupied wire spans become
+        hard edge blocks while perpendicular crossings stay available.
         """
         if start == end:
             return [start]
@@ -166,6 +199,7 @@ class BoardRoutingMixin:
 
         blocked = self._route_blocked_cells_for_side(side, start, end)
         wire_cells = self._route_wire_cells_for_side(side, ignore_wire_indexes=ignore_wire_indexes, extra_occupied=extra_occupied)
+        wire_edges = self._route_wire_edges_for_side(side, ignore_wire_indexes=ignore_wire_indexes, extra_occupied=extra_occupied_edges) if self.avoid_wire_overlaps else set()
         endpoints = {start, end}
 
         # State is (grid point, incoming direction). Keeping the direction in
@@ -202,7 +236,7 @@ class BoardRoutingMixin:
                 nxt = (nr, nc)
                 if not board_contains(nr, nc, rows, cols) or nxt in blocked:
                     continue
-                if nxt in wire_cells and nxt not in {start, end}:
+                if self.avoid_wire_overlaps and self._route_edge(current, nxt) in wire_edges:
                     continue
 
                 step_cost = 10 + self._route_clearance_penalty(nxt, blocked, wire_cells, endpoints)
@@ -313,6 +347,12 @@ class BoardRoutingMixin:
             cells.update(self._segment_grid_points(a, b))
         return cells
 
+    def _route_edges(self, route: list[GridPoint]) -> set[RouteEdge]:
+        edges: set[RouteEdge] = set()
+        for a, b in zip(route, route[1:]):
+            edges.update(self._segment_grid_edges(a, b))
+        return edges
+
     def _via_exists(self, point: GridPoint) -> bool:
         return any((via.row, via.col) == point for via in self.layout_model.vias)
 
@@ -408,6 +448,7 @@ class BoardRoutingMixin:
         *,
         target_indexes: set[int],
         occupied_by_side: Dict[str, set[GridPoint]],
+        occupied_edges_by_side: Optional[Dict[str, set[RouteEdge]]] = None,
     ) -> Optional[tuple[int, GridPoint, GridPoint, list[GridPoint], list[GridPoint], list[GridPoint]]]:
         side = wire.side
         other_side = "back" if side == "front" else "front"
@@ -422,7 +463,7 @@ class BoardRoutingMixin:
         for via_a in near_start:
             route_a = route_a_cache.get(via_a)
             if route_a is None:
-                route_a = self._suggest_route_on_side(start, via_a, side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(side, set()))
+                route_a = self._suggest_route_on_side(start, via_a, side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(side, set()), extra_occupied_edges=(occupied_edges_by_side or {}).get(side, set()))
                 route_a_cache[via_a] = route_a
             if len(route_a) < 2:
                 continue
@@ -433,11 +474,12 @@ class BoardRoutingMixin:
                 route_b_key = (via_a, via_b)
                 route_b = route_b_cache.get(route_b_key)
                 if route_b is None:
-                    route_b = self._suggest_route_on_side(via_a, via_b, other_side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(other_side, set()))
+                    route_b = self._suggest_route_on_side(via_a, via_b, other_side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(other_side, set()), extra_occupied_edges=(occupied_edges_by_side or {}).get(other_side, set()))
                     route_b_cache[route_b_key] = route_b
                 if len(route_b) < 2:
                     continue
-                route_c = self._suggest_route_on_side(via_b, end, side, ignore_wire_indexes=target_indexes, extra_occupied=occ_side_a)
+                occ_edges_side_a = set((occupied_edges_by_side or {}).get(side, set())) | self._route_edges(route_a)
+                route_c = self._suggest_route_on_side(via_b, end, side, ignore_wire_indexes=target_indexes, extra_occupied=occ_side_a, extra_occupied_edges=occ_edges_side_a)
                 if len(route_c) < 2:
                     continue
                 score = self._route_cost(route_a, wire) + self._route_cost(route_b, wire) + self._route_cost(route_c, wire, via_count=2)
@@ -480,7 +522,8 @@ class BoardRoutingMixin:
         *,
         target_indexes: set[int],
         occupied_by_side: Dict[str, set[GridPoint]],
-        allow_cross_side: bool,
+        occupied_edges_by_side: Optional[Dict[str, set[RouteEdge]]] = None,
+        allow_cross_side: bool = False,
     ) -> Optional[tuple[int, list[Wire], list[GridPoint]]]:
         direct = self._suggest_route_on_side(
             start,
@@ -488,11 +531,12 @@ class BoardRoutingMixin:
             source.side,
             ignore_wire_indexes=target_indexes,
             extra_occupied=occupied_by_side.get(source.side, set()),
+            extra_occupied_edges=(occupied_edges_by_side or {}).get(source.side, set()),
         )
         direct_score = self._route_cost(direct, source) if len(direct) >= 2 else 10**9
         via_choice = None
         if allow_cross_side:
-            via_choice = self._best_cross_side_route(source, start, end, target_indexes=target_indexes, occupied_by_side=occupied_by_side)
+            via_choice = self._best_cross_side_route(source, start, end, target_indexes=target_indexes, occupied_by_side=occupied_by_side, occupied_edges_by_side=occupied_edges_by_side or {})
 
         if via_choice is not None and via_choice[0] < direct_score:
             _, via_a, via_b, route_a, route_b, route_c = via_choice
@@ -517,7 +561,8 @@ class BoardRoutingMixin:
         *,
         target_indexes: set[int],
         occupied_by_side: Dict[str, set[GridPoint]],
-        allow_cross_side: bool,
+        occupied_edges_by_side: Optional[Dict[str, set[RouteEdge]]] = None,
+        allow_cross_side: bool = False,
     ) -> Optional[tuple[list[Wire], list[GridPoint]]]:
         points = sorted({pt for idx in group for pt in (original_wires[idx].points[0], original_wires[idx].points[-1])})
         if len(points) < 3 or len(points) > 8 or len(group) != len(points) - 1:
@@ -534,6 +579,7 @@ class BoardRoutingMixin:
                     end,
                     target_indexes=target_indexes,
                     occupied_by_side=occupied_by_side,
+                    occupied_edges_by_side=occupied_edges_by_side or {},
                     allow_cross_side=allow_cross_side,
                 )
                 if plan is None:
@@ -555,6 +601,7 @@ class BoardRoutingMixin:
         chosen_vias: list[GridPoint] = []
         chosen_edges = 0
         topology_occupied: Dict[str, set[GridPoint]] = {side: set(cells) for side, cells in occupied_by_side.items()}
+        topology_occupied_edges: Dict[str, set[RouteEdge]] = {side: set(edges) for side, edges in (occupied_edges_by_side or {}).items()}
         for _, a_idx, b_idx, _segments, _vias in sorted(edges, key=lambda item: item[0]):
             root_a = find(a_idx)
             root_b = find(b_idx)
@@ -568,6 +615,7 @@ class BoardRoutingMixin:
                 points[b_idx],
                 target_indexes=target_indexes,
                 occupied_by_side=topology_occupied,
+                occupied_edges_by_side=topology_occupied_edges,
                 allow_cross_side=allow_cross_side,
             )
             if replanned is None:
@@ -578,6 +626,7 @@ class BoardRoutingMixin:
             chosen_vias.extend(vias)
             for segment in segments:
                 topology_occupied.setdefault(segment.side, set()).update(self._route_cells(segment.points))
+                topology_occupied_edges.setdefault(segment.side, set()).update(self._route_edges(segment.points))
             chosen_edges += 1
             if chosen_edges >= len(points) - 1:
                 break
@@ -677,6 +726,10 @@ class BoardRoutingMixin:
             "front": self._wire_cells_from_wires(kept_wires, "front"),
             "back": self._wire_cells_from_wires(kept_wires, "back"),
         }
+        occupied_edges_by_side: Dict[str, set[RouteEdge]] = {
+            "front": self._wire_edges_from_wires(kept_wires, "front"),
+            "back": self._wire_edges_from_wires(kept_wires, "back"),
+        }
         routed = 0
         failed = 0
         added_vias = 0
@@ -697,6 +750,7 @@ class BoardRoutingMixin:
         def reserve_segments(segments: list[Wire]) -> None:
             for seg in segments:
                 occupied_by_side.setdefault(seg.side, set()).update(self._route_cells(seg.points))
+                occupied_edges_by_side.setdefault(seg.side, set()).update(self._route_edges(seg.points))
 
         for group in sorted(self._target_net_groups(target_indexes, original_wires), key=lambda grp: min(target_order.index(idx) for idx in grp)):
             if group & consumed_indexes:
@@ -706,6 +760,7 @@ class BoardRoutingMixin:
                 original_wires,
                 target_indexes=target_indexes,
                 occupied_by_side=occupied_by_side,
+                occupied_edges_by_side=occupied_edges_by_side,
                 allow_cross_side=allow_cross_side,
             )
             if topology is None:
@@ -730,6 +785,7 @@ class BoardRoutingMixin:
                 end,
                 target_indexes=target_indexes,
                 occupied_by_side=occupied_by_side,
+                occupied_edges_by_side=occupied_edges_by_side,
                 allow_cross_side=allow_cross_side,
             )
             if plan is not None:
@@ -740,6 +796,7 @@ class BoardRoutingMixin:
                 routed += 1
             else:
                 occupied_by_side.setdefault(source.side, set()).update(self._route_cells(source.points))
+                occupied_edges_by_side.setdefault(source.side, set()).update(self._route_edges(source.points))
                 failed_indexes.add(i)
                 failed += 1
 

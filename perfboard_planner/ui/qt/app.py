@@ -193,6 +193,13 @@ class MainWindow(QMainWindow):
         self.footer_route_button.setVisible(False)
         footer_layout.addWidget(self.footer_route_button)
 
+        self.footer_no_overlap_button = QToolButton()
+        self.footer_no_overlap_button.setText("No overlaps")
+        self.footer_no_overlap_button.setToolTip("When enabled, suggested routes may cross existing wires but will not run on top of same-direction wire spans.")
+        self.footer_no_overlap_button.setCheckable(True)
+        self.footer_no_overlap_button.setVisible(False)
+        footer_layout.addWidget(self.footer_no_overlap_button)
+
         self.footer_optimize_button = QToolButton()
         self.footer_optimize_button.setText("Suggest all")
         self.footer_optimize_button.setToolTip("Draw direct endpoint wires first, then reroute them into solder-friendly paths while keeping endpoints")
@@ -494,6 +501,7 @@ class MainWindow(QMainWindow):
         self.clear_muted_warnings_button.clicked.connect(self.clear_muted_warnings)
         self.show_all_colors_btn.clicked.connect(self.show_all_wire_colors)
         self.footer_route_button.clicked.connect(self.start_route_suggestion)
+        self.footer_no_overlap_button.toggled.connect(self._set_avoid_wire_overlaps)
         self.optimize_current_side_action.triggered.connect(lambda: self.optimize_wire_routes("current_side", False))
         self.optimize_whole_board_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", False))
         self.optimize_with_vias_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", True))
@@ -537,6 +545,8 @@ class MainWindow(QMainWindow):
             self.mode_actions[tool].setChecked(True)
         if hasattr(self, "footer_route_button"):
             self.footer_route_button.setVisible(tool == "wire")
+            self.footer_no_overlap_button.setVisible(tool == "wire")
+            self.footer_no_overlap_button.setChecked(self.board.avoid_wire_overlaps)
             self.footer_optimize_button.setVisible(tool == "wire")
             self.update_route_button()
         self.statusBar().showMessage(f"Mode: {tool}")
@@ -1744,7 +1754,11 @@ class MainWindow(QMainWindow):
         cross_side.setChecked(self.board.allow_route_suggestion_cross_side)
         cross_side.toggled.connect(self._set_route_suggestion_cross_side)
         wire.addRow(cross_side)
-        hint = QLabel("Use the bottom-bar Suggest route button, then click two board holes or pins. When cross-side routing is enabled, the suggestion may add vias and a same-color segment on the opposite side if that route is shorter or safer.")
+        no_overlap = QCheckBox("No wire overlaps (crossings still allowed)")
+        no_overlap.setChecked(self.board.avoid_wire_overlaps)
+        no_overlap.toggled.connect(self._set_avoid_wire_overlaps)
+        wire.addRow(no_overlap)
+        hint = QLabel("Use the bottom-bar Suggest route button, then click two board holes or pins. When cross-side routing is enabled, the suggestion may add vias and a same-color segment on the opposite side if that route is shorter or safer. Enable No overlaps when a project must never place two same-direction wire runs on top of each other.")
         hint.setObjectName("MutedLabel")
         hint.setWordWrap(True)
         wire.addRow(hint)
@@ -1752,6 +1766,15 @@ class MainWindow(QMainWindow):
     def _set_route_suggestion_cross_side(self, value: bool) -> None:
         self.board.allow_route_suggestion_cross_side = bool(value)
         mode = "may use vias and the other side" if value else "stays on the current side"
+        self.statusBar().showMessage(f"Suggest route {mode}.")
+
+    def _set_avoid_wire_overlaps(self, value: bool) -> None:
+        self.board.avoid_wire_overlaps = bool(value)
+        if hasattr(self, "footer_no_overlap_button"):
+            self.footer_no_overlap_button.blockSignals(True)
+            self.footer_no_overlap_button.setChecked(self.board.avoid_wire_overlaps)
+            self.footer_no_overlap_button.blockSignals(False)
+        mode = "will not overlap same-direction wire spans" if value else "may reuse wire spans when necessary"
         self.statusBar().showMessage(f"Suggest route {mode}.")
 
     def _inspect_new_keepout_tool(self) -> None:

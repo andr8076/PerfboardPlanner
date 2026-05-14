@@ -379,6 +379,58 @@ def test_qt_suggest_route_avoids_existing_wire_cells(monkeypatch):
         app.processEvents()
 
 
+def test_qt_no_overlap_router_avoids_same_direction_wire_spans(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=5, cols=5)
+        existing = Wire("existing", [(1, 0), (1, 4)], "#00aa00", "front")
+        layout.wires.append(existing)
+        window.board.set_layout(layout)
+        window.board.avoid_wire_overlaps = True
+
+        route = window.board._suggest_route((1, 0), (1, 4))
+
+        assert route
+        assert window.board._route_edges(route).isdisjoint(window.board._route_edges(existing.points))
+        assert route != [(1, 0), (1, 4)]
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_no_overlap_router_still_allows_crossings(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=5, cols=5)
+        layout.wires.append(Wire("existing", [(0, 2), (4, 2)], "#00aa00", "front"))
+        window.board.set_layout(layout)
+        window.board.avoid_wire_overlaps = True
+
+        route = window.board._suggest_route((2, 0), (2, 4))
+
+        assert route == [(2, 0), (2, 4)]
+        assert (2, 2) in window.board._route_cells(route)
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
 
 def test_qt_router_prefers_clear_detour_over_crowded_equal_path(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
