@@ -2068,7 +2068,7 @@ class PinEditorDialog(QDialog):
         self.grid_buttons: dict[tuple[int, int], QToolButton] = {}
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Click cells to add/select component attachment pins. Yellow cells are the visible component body; outer cells are external lead positions."))
+        layout.addWidget(QLabel("Click a pin to select it, then click an empty cell to move it. Ctrl-click an empty cell to add a new pin. Yellow cells are the visible component body; outer cells are external lead positions."))
 
         body = QHBoxLayout()
         layout.addLayout(body, 1)
@@ -2308,6 +2308,39 @@ class PinEditorDialog(QDialog):
             n += 1
         return f"P{n}"
 
+    def _selected_pin(self) -> Optional[ComponentPin]:
+        return next((p for p in self.pins if p.name == self.selected_pin_name), None)
+
+    def _refresh_after_pin_position_change(self) -> None:
+        # Moving to the currently visible range only needs style/list refreshes,
+        # but external lead positions can expand the grid. Rebuild when needed.
+        rows, cols = self._range()
+        expected_keys = {(row, col) for row in rows for col in cols}
+        self.refresh_pin_list()
+        self.refresh_jumpers()
+        if set(self.grid_buttons) != expected_keys:
+            self.refresh_grid()
+        else:
+            self.refresh_grid_styles()
+
+    def move_selected_pin_to(self, row: int, col: int) -> bool:
+        pin = self._selected_pin()
+        if pin is None or self.pin_at(row, col) is not None:
+            return False
+        pin.row = row
+        pin.col = col
+        self._refresh_after_pin_position_change()
+        return True
+
+    def add_pin_at(self, row: int, col: int) -> ComponentPin | None:
+        if self.pin_at(row, col) is not None:
+            return None
+        pin = ComponentPin(self._next_pin_name(), row, col)
+        self.pins.append(pin)
+        self.selected_pin_name = pin.name
+        self._refresh_after_pin_position_change()
+        return pin
+
     def toggle_pin_cell(self, row: int, col: int) -> None:
         pin = self.pin_at(row, col)
         if pin:
@@ -2315,15 +2348,12 @@ class PinEditorDialog(QDialog):
             self.refresh_pin_list()
             self.refresh_grid_styles()
             return
-        pin = ComponentPin(self._next_pin_name(), row, col)
-        self.pins.append(pin)
-        self.selected_pin_name = pin.name
-        # The clicked cell is already inside the currently visible range, so the
-        # grid does not need to be destroyed and rebuilt. Refreshing only the
-        # list/combos and button styles keeps the editor stable while editing.
-        self.refresh_pin_list()
-        self.refresh_jumpers()
-        self.refresh_grid_styles()
+
+        modifiers = QApplication.keyboardModifiers()
+        add_new_pin = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+        if not add_new_pin and self.move_selected_pin_to(row, col):
+            return
+        self.add_pin_at(row, col)
 
     def rename_selected_pin(self) -> None:
         pin = next((p for p in self.pins if p.name == self.selected_pin_name), None)

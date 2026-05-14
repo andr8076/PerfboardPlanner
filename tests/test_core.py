@@ -454,6 +454,59 @@ def test_qt_drag_component_moves_attached_wire_endpoints(monkeypatch):
         app.processEvents()
 
 
+
+def test_qt_pin_editor_click_moves_selected_pin(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import PinEditorDialog
+
+    app = QApplication.instance() or QApplication([])
+    component = Component(
+        "U1",
+        0,
+        0,
+        3,
+        2,
+        "#ffcc66",
+        pins=[ComponentPin("A", 0, 0), ComponentPin("B", 1, 2)],
+    )
+    dialog = PinEditorDialog(component)
+    try:
+        dialog.selected_pin_name = "A"
+
+        dialog.toggle_pin_cell(0, 1)
+
+        assert [(pin.name, pin.row, pin.col) for pin in dialog.pins] == [("A", 0, 1), ("B", 1, 2)]
+        assert dialog.selected_pin_name == "A"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+def test_qt_pin_editor_can_still_add_pins(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import PinEditorDialog
+
+    app = QApplication.instance() or QApplication([])
+    component = Component("U1", 0, 0, 3, 2, "#ffcc66", pins=[])
+    dialog = PinEditorDialog(component)
+    try:
+        added = dialog.add_pin_at(0, 1)
+
+        assert added is not None
+        assert [(pin.name, pin.row, pin.col) for pin in dialog.pins] == [("P1", 0, 1)]
+        assert dialog.selected_pin_name == "P1"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
 def test_qt_suggest_all_can_move_unlocked_components_for_shorter_routes(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)

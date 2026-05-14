@@ -1426,8 +1426,8 @@ class PerfboardPlanner(tk.Tk):
         info = ttk.Label(
             win,
             text=(
-                "Click cells to toggle component attachment pins.\n"
-                "Rows/columns are relative to the component's top-left hole.\n"
+                "Click a pin to select it, then click an empty cell to move it.\n"
+                "Ctrl-click an empty cell to add a new pin. Rows/columns are relative to the component's top-left hole.\n"
                 "Cells outside the yellow body area are external leads/pins."
             ),
             justify=tk.LEFT,
@@ -1568,17 +1568,34 @@ class PerfboardPlanner(tk.Tk):
                     return row, col
             return None
 
+        def selected_pin_name() -> Optional[str]:
+            pos = selected_pos[0]
+            if pos is None:
+                return None
+            return pin_map.get(pos)
+
+        def add_new_pin(pos: Tuple[int, int]) -> None:
+            pin_map[pos] = next_pin_name()
+            selected_pos[0] = pos
+
+        def move_selected_pin(pos: Tuple[int, int]) -> bool:
+            name = selected_pin_name()
+            old_pos = selected_pos[0]
+            if name is None or old_pos is None or pos in pin_map:
+                return False
+            del pin_map[old_pos]
+            pin_map[pos] = name
+            selected_pos[0] = pos
+            return True
+
         def on_editor_click(event):
             pos = canvas_to_cell(event.x, event.y)
             if pos is None:
                 return
-            selected_pos[0] = pos
             if pos in pin_map:
-                old_name = pin_map[pos]
-                del pin_map[pos]
-                jumper_list[:] = [j for j in jumper_list if j.pin_a != old_name and j.pin_b != old_name]
-            else:
-                pin_map[pos] = next_pin_name()
+                selected_pos[0] = pos
+            elif event.state & 0x0004 or not move_selected_pin(pos):
+                add_new_pin(pos)
             draw_editor()
 
         def on_list_select(event=None):
@@ -1608,6 +1625,17 @@ class PerfboardPlanner(tk.Tk):
                     jumper.pin_a = new_name
                 if jumper.pin_b == old_name:
                     jumper.pin_b = new_name
+            draw_editor()
+
+        def remove_selected_pin():
+            pos = selected_pos[0]
+            if pos is None or pos not in pin_map:
+                messagebox.showinfo("Remove pin", "Select a pin first.", parent=win)
+                return
+            old_name = pin_map[pos]
+            del pin_map[pos]
+            jumper_list[:] = [j for j in jumper_list if j.pin_a != old_name and j.pin_b != old_name]
+            selected_pos[0] = None
             draw_editor()
 
         def clear_pins():
@@ -1689,8 +1717,8 @@ class PerfboardPlanner(tk.Tk):
         pin_list.bind("<<ListboxSelect>>", on_list_select)
 
         ttk.Button(editor, text="Rename selected", command=rename_selected).grid(row=2, column=1, sticky="ew", pady=(8, 2))
-        ttk.Button(editor, text="Clear pins", command=clear_pins).grid(row=3, column=1, sticky="ew", pady=2)
-        ttk.Separator(editor).grid(row=4, column=1, sticky="ew", pady=6)
+        ttk.Button(editor, text="Remove selected", command=remove_selected_pin).grid(row=3, column=1, sticky="ew", pady=2)
+        ttk.Button(editor, text="Clear pins", command=clear_pins).grid(row=4, column=1, sticky="ew", pady=2)
         ttk.Button(editor, text="2-pin horizontal", command=set_two_pin_horizontal).grid(row=5, column=1, sticky="ew", pady=2)
         ttk.Button(editor, text="4 corners", command=set_four_corners).grid(row=9, column=1, sticky="ew", pady=(8, 2))
         ttk.Button(editor, text="DIP sides", command=set_dip_sides).grid(row=10, column=1, sticky="ew", pady=2)
