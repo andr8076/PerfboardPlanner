@@ -380,6 +380,53 @@ def test_qt_suggest_route_avoids_existing_wire_cells(monkeypatch):
 
 
 
+def test_qt_router_prefers_clear_detour_over_crowded_equal_path(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=5, cols=5)
+        layout.keepouts.append(KeepoutZone("block", 2, 2, 2, 2, side="front"))
+        layout.wires.append(Wire("crowd", [(0, 0), (0, 4)], "#00aa00", "front"))
+        window.board.set_layout(layout)
+
+        route = window.board._suggest_route((2, 0), (2, 4))
+
+        assert route == [(2, 0), (3, 0), (3, 4), (2, 4)]
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_qt_router_prioritizes_reusing_existing_vias(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    QApplication = qt_widgets.QApplication
+
+    from perfboard_planner.ui.qt.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    try:
+        layout = Layout(rows=10, cols=10)
+        layout.vias.append(Via(8, 8))
+        window.board.set_layout(layout)
+
+        candidates = window.board._candidate_via_points((0, 0), (0, 9), "front", "back", limit=3)
+
+        assert (8, 8) in candidates
+    finally:
+        window._set_dirty(False)
+        window.close()
+        window.deleteLater()
+        app.processEvents()
 
 def test_qt_rotate_component_moves_attached_wire_endpoints(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")

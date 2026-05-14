@@ -108,6 +108,40 @@ class BoardRoutingMixin:
         result.append(points[-1])
         return result
 
+    def _route_clearance_penalty(self, point: GridPoint, blocked: set[GridPoint], wire_cells: set[GridPoint], endpoints: set[GridPoint]) -> int:
+        """Soft cost for hugging obstacles even when the cell itself is legal."""
+        if point in endpoints:
+            return 0
+        rows, cols = self.layout_model.rows, self.layout_model.cols
+        penalty = 0
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            neighbor = (point[0] + dr, point[1] + dc)
+            if not board_contains(neighbor[0], neighbor[1], rows, cols):
+                penalty += 1
+            elif neighbor in blocked:
+                penalty += 5
+            elif neighbor in wire_cells and neighbor not in endpoints:
+                penalty += 3
+        for dr, dc in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            neighbor = (point[0] + dr, point[1] + dc)
+            if neighbor in blocked:
+                penalty += 1
+        return penalty
+
+    @staticmethod
+    def _preferred_directions(current: GridPoint, end: GridPoint) -> list[tuple[int, int]]:
+        vertical = (1, 0) if end[0] >= current[0] else (-1, 0)
+        horizontal = (0, 1) if end[1] >= current[1] else (0, -1)
+        directions: list[tuple[int, int]] = []
+        if abs(end[1] - current[1]) >= abs(end[0] - current[0]):
+            directions.extend([horizontal, vertical])
+        else:
+            directions.extend([vertical, horizontal])
+        for direction in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if direction not in directions:
+                directions.append(direction)
+        return directions
+
     def _suggest_route_on_side(
         self,
         start: GridPoint,
@@ -132,7 +166,7 @@ class BoardRoutingMixin:
 
         blocked = self._route_blocked_cells_for_side(side, start, end)
         wire_cells = self._route_wire_cells_for_side(side, ignore_wire_indexes=ignore_wire_indexes, extra_occupied=extra_occupied)
-        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        endpoints = {start, end}
 
         # State is (grid point, incoming direction). Keeping the direction in
         # the state lets us penalize bends without corrupting the parent chain.
@@ -163,7 +197,7 @@ class BoardRoutingMixin:
                 found_state = state
                 break
 
-            for direction in directions:
+            for direction in self._preferred_directions(current, end):
                 nr, nc = current[0] + direction[0], current[1] + direction[1]
                 nxt = (nr, nc)
                 if not board_contains(nr, nc, rows, cols) or nxt in blocked:
@@ -171,7 +205,7 @@ class BoardRoutingMixin:
                 if nxt in wire_cells and nxt not in {start, end}:
                     continue
 
-                step_cost = 10
+                step_cost = 10 + self._route_clearance_penalty(nxt, blocked, wire_cells, endpoints)
                 if prev_dir is not None and direction != prev_dir:
                     step_cost += 14
 
@@ -296,24 +330,42 @@ class BoardRoutingMixin:
         if limit is None:
             # Small boards only need a handful of options, but larger or more
             # congested layouts benefit from a wider search around the corridor.
-            limit = min(64, max(18, (self.layout_model.rows + self.layout_model.cols) // 2))
+            limit = min(96, max(24, self.layout_model.rows + self.layout_model.cols))
         blocked_side = self._route_blocked_cells_for_side(side, start, end)
         blocked_other = self._route_blocked_cells_for_side(other_side, start, end)
         rows, cols = self.layout_model.rows, self.layout_model.cols
         sr, sc = start; er, ec = end
+        existing_vias = {(via.row, via.col) for via in self.layout_model.vias}
         candidates: list[tuple[int, GridPoint]] = []
         for r in range(rows):
             for c in range(cols):
                 pt = (r, c)
                 if pt in {start, end} or pt in blocked_side or pt in blocked_other:
                     continue
-                # Prefer places near the start/end corridor, but keep enough
-                # candidates for the router to go around obstacles.
-                dist_to_ends = min(abs(r - sr) + abs(c - sc), abs(r - er) + abs(c - ec))
+                # Prefer existing via holes, then places near the start/end
+                # corridor. Keep enough candidates for routes that must leave
+                # the obvious corridor to get around components or keepouts.
+                dist_start = abs(r - sr) + abs(c - sc)
+                dist_end = abs(r - er) + abs(c - ec)
                 corridor = abs((r - sr) * (ec - sc) - (c - sc) * (er - sr)) if start != end else 0
-                candidates.append((dist_to_ends * 8 + corridor, pt))
+                balance = abs(dist_start - dist_end)
+                existing_bonus = -220 if pt in existing_vias else 0
+                candidates.append((existing_bonus + min(dist_start, dist_end) * 5 + corridor + balance * 2, pt))
         candidates.sort(key=lambda item: item[0])
         return [pt for _, pt in candidates[:limit]]
+
+    def _ranked_via_points(self, candidates: list[GridPoint], anchor: GridPoint, *, limit: int = 24) -> list[GridPoint]:
+        existing_vias = {(via.row, via.col) for via in self.layout_model.vias}
+        ranked = sorted(
+            candidates,
+            key=lambda pt: (
+                0 if pt in existing_vias else 1,
+                abs(pt[0] - anchor[0]) + abs(pt[1] - anchor[1]),
+                pt[0],
+                pt[1],
+            ),
+        )
+        return ranked[: min(limit, len(ranked))]
 
     def _route_endpoint_freedom(self, point: GridPoint, side: str, other_endpoint: GridPoint) -> int:
         blocked = self._route_blocked_cells_for_side(side, point, other_endpoint)
@@ -362,18 +414,27 @@ class BoardRoutingMixin:
         candidates = self._candidate_via_points(start, end, side, other_side)
         if len(candidates) < 2:
             return None
-        near_start = sorted(candidates, key=lambda pt: abs(pt[0]-start[0]) + abs(pt[1]-start[1]))[:10]
-        near_end = sorted(candidates, key=lambda pt: abs(pt[0]-end[0]) + abs(pt[1]-end[1]))[:10]
+        near_start = self._ranked_via_points(candidates, start)
+        near_end = self._ranked_via_points(candidates, end)
         best: Optional[tuple[int, GridPoint, GridPoint, list[GridPoint], list[GridPoint], list[GridPoint]]] = None
+        route_a_cache: dict[GridPoint, list[GridPoint]] = {}
+        route_b_cache: dict[tuple[GridPoint, GridPoint], list[GridPoint]] = {}
         for via_a in near_start:
-            route_a = self._suggest_route_on_side(start, via_a, side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(side, set()))
+            route_a = route_a_cache.get(via_a)
+            if route_a is None:
+                route_a = self._suggest_route_on_side(start, via_a, side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(side, set()))
+                route_a_cache[via_a] = route_a
             if len(route_a) < 2:
                 continue
             occ_side_a = set(occupied_by_side.get(side, set())) | self._route_cells(route_a)
             for via_b in near_end:
                 if via_a == via_b:
                     continue
-                route_b = self._suggest_route_on_side(via_a, via_b, other_side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(other_side, set()))
+                route_b_key = (via_a, via_b)
+                route_b = route_b_cache.get(route_b_key)
+                if route_b is None:
+                    route_b = self._suggest_route_on_side(via_a, via_b, other_side, ignore_wire_indexes=target_indexes, extra_occupied=occupied_by_side.get(other_side, set()))
+                    route_b_cache[route_b_key] = route_b
                 if len(route_b) < 2:
                     continue
                 route_c = self._suggest_route_on_side(via_b, end, side, ignore_wire_indexes=target_indexes, extra_occupied=occ_side_a)
