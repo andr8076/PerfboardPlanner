@@ -7,6 +7,99 @@ from perfboard_planner.core.storage import layout_from_dict, layout_to_dict
 from perfboard_planner.core.selection import is_selectable_item
 from perfboard_planner.core.connectivity import build_graph, connected_nodes
 
+from perfboard_planner.ui.qt.routing import BoardRoutingMixin
+
+
+class _NoopSignal:
+    def emit(self, *args, **kwargs):
+        return None
+
+
+class _HeadlessRoutingBoard(BoardRoutingMixin):
+    def __init__(self, layout: Layout, *, side: str = "front"):
+        self.layout_model = layout
+        self.side = side
+        self.hidden_wire_colors = set()
+        self.hidden_groups = set()
+        self.avoid_wire_overlaps = False
+        self.allow_route_component_side_changes = False
+        self.route_movable_component_indexes = None
+        self.selected = set()
+        self.beforeLayoutChange = _NoopSignal()
+        self.layoutChanged = _NoopSignal()
+        self.selectionChanged = _NoopSignal()
+
+    def update(self):
+        return None
+
+    def _is_item_hidden_by_group(self, item) -> bool:
+        group = getattr(item, "group", "")
+        return bool(group and group in self.hidden_groups)
+
+    def _component_body_cells_at(self, comp: Component, row: int, col: int) -> set[tuple[int, int]]:
+        return {
+            (r, c)
+            for r in range(row, row + comp.height)
+            for c in range(col, col + comp.width)
+            if 0 <= r < self.layout_model.rows and 0 <= c < self.layout_model.cols
+        }
+
+    def _component_pin_points_at(self, comp: Component, row: int, col: int) -> dict[str, tuple[int, int]]:
+        return {pin.name: (row + pin.row, col + pin.col) for pin in comp.pins}
+
+    def _component_can_move_to(self, comp_idx: int, row: int, col: int) -> bool:
+        comp = self.layout_model.components[comp_idx]
+        if row < 0 or col < 0 or row + comp.height > self.layout_model.rows or col + comp.width > self.layout_model.cols:
+            return False
+        candidate = self._component_body_cells_at(comp, row, col)
+        for other_idx, other in enumerate(self.layout_model.components):
+            if other_idx == comp_idx or other.side != comp.side or self._is_item_hidden_by_group(other):
+                continue
+            if candidate & self._component_body_cells_at(other, other.row, other.col):
+                return False
+        return True
+
+    def _wire_endpoint_points(self, wire: Wire) -> tuple[tuple[int, int], tuple[int, int]]:
+        return wire.points[0], wire.points[-1]
+
+    def _component_pin_substitutions(
+        self,
+        comp: Component,
+        old_row: int,
+        old_col: int,
+        new_row: int,
+        new_col: int,
+    ) -> dict[tuple[int, int], tuple[int, int]]:
+        old_pins = self._component_pin_points_at(comp, old_row, old_col)
+        new_pins = self._component_pin_points_at(comp, new_row, new_col)
+        return {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+
+    def _move_wire_endpoints_for_pin_substitutions(
+        self,
+        side: str,
+        substitutions: dict[tuple[int, int], tuple[int, int]],
+        *,
+        skip_wire_indexes: set[int] | None = None,
+    ) -> None:
+        if not substitutions:
+            return
+        skip_wire_indexes = skip_wire_indexes or set()
+        for wire_idx, wire in enumerate(self.layout_model.wires):
+            if wire_idx in skip_wire_indexes or wire.locked or wire.side != side or len(wire.points) < 2:
+                continue
+            updated = list(wire.points)
+            updated[0] = substitutions.get(updated[0], updated[0])
+            updated[-1] = substitutions.get(updated[-1], updated[-1])
+            wire.points = updated
+
+    def _component_has_locked_wire_endpoint(self, comp_idx: int) -> bool:
+        comp = self.layout_model.components[comp_idx]
+        pin_points = set(self._component_pin_points_at(comp, comp.row, comp.col).values())
+        for wire in self.layout_model.wires:
+            if wire.locked and wire.side == comp.side and len(wire.points) >= 2 and set(self._wire_endpoint_points(wire)) & pin_points:
+                return True
+        return False
+
 
 def test_storage_roundtrip():
     layout = layout_from_dict({
@@ -659,6 +752,72 @@ def test_qt_pin_editor_can_still_add_pins(monkeypatch):
         dialog.close()
         dialog.deleteLater()
         app.processEvents()
+
+
+def test_route_optimizer_move_filter_keeps_unselected_components_fixed():
+    layout = Layout(rows=10, cols=14)
+    left_a = Component("JA", 1, 1, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+    left_b = Component("JB", 6, 1, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+    unselected = Component("Header", 1, 12, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)])
+    selected = Component("Gyro", 6, 12, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)])
+    layout.components.extend([left_a, left_b, unselected, selected])
+    layout.wires.append(Wire("header-signal", [(1, 1), (1, 12)], "#d00000", "front"))
+    layout.wires.append(Wire("gyro-signal", [(6, 1), (6, 12)], "#00aa00", "front"))
+    board = _HeadlessRoutingBoard(layout)
+    board.route_movable_component_indexes = {3}
+
+    routed, failed, vias, moved = board.optimize_wire_routes(
+        scope="whole_board",
+        allow_cross_side=False,
+        allow_move_components=True,
+    )
+
+    assert (routed, failed, vias, moved) == (2, 0, 0, 1)
+    assert (unselected.row, unselected.col) == (1, 12)
+    assert (selected.row, selected.col) != (6, 12)
+    assert layout.wires[-1].points[-1] == component_pin_absolute(selected, selected.pins[0])
+
+
+def test_route_optimizer_empty_move_filter_disables_component_moves():
+    layout = Layout(rows=8, cols=12)
+    fixed = Component("A", 1, 1, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+    movable = Component("B", 1, 10, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)])
+    layout.components.extend([fixed, movable])
+    layout.wires.append(Wire("signal", [(1, 1), (1, 10)], "#d00000", "front"))
+    board = _HeadlessRoutingBoard(layout)
+    board.route_movable_component_indexes = set()
+
+    routed, failed, vias, moved = board.optimize_wire_routes(
+        scope="whole_board",
+        allow_cross_side=False,
+        allow_move_components=True,
+    )
+
+    assert (routed, failed, vias, moved) == (1, 0, 0, 0)
+    assert (movable.row, movable.col) == (1, 10)
+    assert layout.wires[0].points[-1] == (1, 10)
+
+
+def test_route_optimizer_unfiltered_moves_all_beneficial_unlocked_components():
+    layout = Layout(rows=10, cols=14)
+    left_a = Component("JA", 1, 1, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+    left_b = Component("JB", 6, 1, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)], locked=True)
+    header = Component("Header", 1, 12, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)])
+    gyro = Component("Gyro", 6, 12, 1, 1, "#ffcc66", side="front", pins=[ComponentPin("P", 0, 0)])
+    layout.components.extend([left_a, left_b, header, gyro])
+    layout.wires.append(Wire("header-signal", [(1, 1), (1, 12)], "#d00000", "front"))
+    layout.wires.append(Wire("gyro-signal", [(6, 1), (6, 12)], "#00aa00", "front"))
+    board = _HeadlessRoutingBoard(layout)
+
+    routed, failed, vias, moved = board.optimize_wire_routes(
+        scope="whole_board",
+        allow_cross_side=False,
+        allow_move_components=True,
+    )
+
+    assert (routed, failed, vias, moved) == (2, 0, 0, 2)
+    assert (header.row, header.col) != (1, 12)
+    assert (gyro.row, gyro.col) != (6, 12)
 
 
 def test_qt_route_optimize_worker_runs_without_gui_thread_widgets(monkeypatch):
