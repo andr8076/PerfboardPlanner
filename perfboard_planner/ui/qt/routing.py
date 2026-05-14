@@ -275,7 +275,7 @@ class BoardRoutingMixin:
     def _suggest_route_plan(self, start: GridPoint, end: GridPoint) -> tuple[list[tuple[list[GridPoint], str]], list[GridPoint]]:
         helper_wire = Wire("", [start, end], self.current_wire_color, side=self.side)
         direct = self._suggest_route_on_side(start, end, self.side)
-        direct_score = self._route_cost(direct, helper_wire) if len(direct) >= 2 else 10**9
+        direct_score = self._route_cost(direct, helper_wire, side=self.side) if len(direct) >= 2 else 10**9
         via_choice = None
         if self.allow_route_suggestion_cross_side:
             occupied_by_side = {
@@ -331,15 +331,48 @@ class BoardRoutingMixin:
         )
         return straight and near_edge and length >= max(6, max(self.layout_model.rows, self.layout_model.cols) // 3)
 
-    def _route_cost(self, route: list[GridPoint], wire: Optional[Wire] = None, *, via_count: int = 0) -> int:
+    def _route_congestion_penalty(
+        self,
+        route: list[GridPoint],
+        side: str,
+        *,
+        occupied_cells: Optional[set[GridPoint]] = None,
+        occupied_edges: Optional[set[RouteEdge]] = None,
+    ) -> int:
+        if len(route) < 2:
+            return 0
+        endpoints = {route[0], route[-1]}
+        occupied_cells = occupied_cells if occupied_cells is not None else self._route_wire_cells_for_side(side)
+        occupied_edges = occupied_edges if occupied_edges is not None else self._route_wire_edges_for_side(side)
+        penalty = 0
+        for point in self._route_cells(route):
+            if point not in endpoints and point in occupied_cells:
+                penalty += 10
+        for edge in self._route_edges(route):
+            if edge in occupied_edges:
+                penalty += 36
+        return penalty
+
+    def _route_cost(
+        self,
+        route: list[GridPoint],
+        wire: Optional[Wire] = None,
+        *,
+        via_count: int = 0,
+        side: Optional[str] = None,
+        occupied_cells: Optional[set[GridPoint]] = None,
+        occupied_edges: Optional[set[RouteEdge]] = None,
+    ) -> int:
         if not route or len(route) < 2:
             return 10**9
         length, bends = self._route_metrics(route)
         bend_penalty = 24 if wire is not None and self._wire_is_power_ground_or_rail(wire) else 16
+        side = side or (wire.side if wire is not None else self.side)
+        congestion_penalty = self._route_congestion_penalty(route, side, occupied_cells=occupied_cells, occupied_edges=occupied_edges)
         # Solderability score: short jumpers are best, bends cost time and
-        # mistakes, and vias are deliberately expensive so cross-side routing
-        # wins only when it materially improves or unblocks the route.
-        return length * 10 + bends * bend_penalty + via_count * 95
+        # mistakes, congestion/overlap is undesirable, and vias are expensive
+        # but cheap enough that a genuinely cleaner back-side route can win.
+        return length * 10 + bends * bend_penalty + congestion_penalty + via_count * 65
 
     def _route_cells(self, route: list[GridPoint]) -> set[GridPoint]:
         cells: set[GridPoint] = set()
@@ -482,7 +515,11 @@ class BoardRoutingMixin:
                 route_c = self._suggest_route_on_side(via_b, end, side, ignore_wire_indexes=target_indexes, extra_occupied=occ_side_a, extra_occupied_edges=occ_edges_side_a)
                 if len(route_c) < 2:
                     continue
-                score = self._route_cost(route_a, wire) + self._route_cost(route_b, wire) + self._route_cost(route_c, wire, via_count=2)
+                score = (
+                    self._route_cost(route_a, wire, side=side, occupied_cells=occupied_by_side.get(side, set()), occupied_edges=(occupied_edges_by_side or {}).get(side, set()))
+                    + self._route_cost(route_b, wire, side=other_side, occupied_cells=occupied_by_side.get(other_side, set()), occupied_edges=(occupied_edges_by_side or {}).get(other_side, set()))
+                    + self._route_cost(route_c, wire, side=side, occupied_cells=occ_side_a, occupied_edges=occ_edges_side_a, via_count=2)
+                )
                 if best is None or score < best[0]:
                     best = (score, via_a, via_b, route_a, route_b, route_c)
         return best
@@ -533,7 +570,13 @@ class BoardRoutingMixin:
             extra_occupied=occupied_by_side.get(source.side, set()),
             extra_occupied_edges=(occupied_edges_by_side or {}).get(source.side, set()),
         )
-        direct_score = self._route_cost(direct, source) if len(direct) >= 2 else 10**9
+        direct_score = self._route_cost(
+            direct,
+            source,
+            side=source.side,
+            occupied_cells=occupied_by_side.get(source.side, set()),
+            occupied_edges=(occupied_edges_by_side or {}).get(source.side, set()),
+        ) if len(direct) >= 2 else 10**9
         via_choice = None
         if allow_cross_side:
             via_choice = self._best_cross_side_route(source, start, end, target_indexes=target_indexes, occupied_by_side=occupied_by_side, occupied_edges_by_side=occupied_edges_by_side or {})
@@ -658,6 +701,22 @@ class BoardRoutingMixin:
         comp.col = col
         self._move_wire_endpoints_for_pin_substitutions(comp.side, substitutions)
 
+    def _component_route_move_radius(self, comp) -> int:
+        pin_count = len(getattr(comp, "pins", []))
+        area = max(1, int(comp.width) * int(comp.height))
+        if pin_count >= 8 or area >= 18:
+            return 1
+        if pin_count >= 4 or area >= 8:
+            return 2
+        return 4
+
+    def _component_route_move_weight(self, comp, score: int, row: int, col: int) -> int:
+        travel = abs(row - comp.row) + abs(col - comp.col)
+        pin_count = len(getattr(comp, "pins", []))
+        area = max(1, int(comp.width) * int(comp.height))
+        travel_penalty = travel * (2 + pin_count + area // 6)
+        return score * 10 + travel_penalty
+
     def _move_unlocked_components_for_routes(self, target_indexes: set[int], scope: str) -> int:
         target_sides = {self.side} if scope == "current_side" else {"front", "back"}
         endpoint_points_by_side: dict[str, set[GridPoint]] = {"front": set(), "back": set()}
@@ -680,19 +739,27 @@ class BoardRoutingMixin:
         for idx in sorted(movable, key=lambda comp_idx: self._route_endpoint_score_for_component(comp_idx, self.layout_model.components[comp_idx].row, self.layout_model.components[comp_idx].col, target_indexes), reverse=True):
             comp = self.layout_model.components[idx]
             current_score = self._route_endpoint_score_for_component(idx, comp.row, comp.col, target_indexes)
-            best = (current_score, comp.row, comp.col)
-            for row in range(0, self.layout_model.rows - comp.height + 1):
-                for col in range(0, self.layout_model.cols - comp.width + 1):
+            current_weight = self._component_route_move_weight(comp, current_score, comp.row, comp.col)
+            best = (current_weight, current_score, comp.row, comp.col)
+            radius = self._component_route_move_radius(comp)
+            min_row = max(0, comp.row - radius)
+            max_row = min(self.layout_model.rows - comp.height, comp.row + radius)
+            min_col = max(0, comp.col - radius)
+            max_col = min(self.layout_model.cols - comp.width, comp.col + radius)
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
                     if row == comp.row and col == comp.col:
                         continue
                     if not self._component_can_move_to(idx, row, col):
                         continue
                     score = self._route_endpoint_score_for_component(idx, row, col, target_indexes)
+                    weight = self._component_route_move_weight(comp, score, row, col)
                     travel = abs(row - comp.row) + abs(col - comp.col)
-                    if (score, travel) < (best[0], abs(best[1] - comp.row) + abs(best[2] - comp.col)):
-                        best = (score, row, col)
-            if best[0] < current_score:
-                self._apply_component_move_for_routes(idx, best[1], best[2])
+                    if (weight, score, travel) < (best[0], best[1], abs(best[2] - comp.row) + abs(best[3] - comp.col)):
+                        best = (weight, score, row, col)
+            required_gain = max(2, len(getattr(comp, "pins", [])))
+            if best[0] <= current_weight - required_gain:
+                self._apply_component_move_for_routes(idx, best[2], best[3])
                 moved += 1
         return moved
 
