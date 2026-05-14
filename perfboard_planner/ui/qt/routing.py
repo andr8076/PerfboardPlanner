@@ -758,8 +758,11 @@ class BoardRoutingMixin:
             if len(wire.points) >= 2:
                 endpoint_points_by_side.setdefault(wire.side, set()).update(self._wire_endpoint_points(wire))
 
+        movable_indexes = getattr(self, "route_movable_component_indexes", None)
         movable = []
         for idx, comp in enumerate(self.layout_model.components):
+            if movable_indexes is not None and idx not in movable_indexes:
+                continue
             if comp.locked or comp.side not in target_sides or self._is_item_hidden_by_group(comp):
                 continue
             if self._component_has_locked_wire_endpoint(idx):

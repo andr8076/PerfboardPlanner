@@ -121,6 +121,8 @@ class _RoutingWorkerBoard(BoardRoutingMixin):
         self.hidden_wire_colors = set(hidden_wire_colors)
         self.hidden_groups = set(hidden_groups)
         self.avoid_wire_overlaps = bool(avoid_wire_overlaps)
+        self.allow_route_component_side_changes = False
+        self.route_movable_component_indexes: set[int] | None = None
         self.selected: set[Selection] = set()
         self.beforeLayoutChange = _NoopSignal()
         self.layoutChanged = _NoopSignal()
@@ -213,6 +215,8 @@ class RouteOptimizeWorker(QObject):
                 avoid_wire_overlaps=bool(self.options.get("avoid_wire_overlaps", False)),
             )
             board.allow_route_component_side_changes = bool(self.options.get("allow_component_side_changes", False))
+            movable_indexes = self.options.get("movable_component_indexes")
+            board.route_movable_component_indexes = set(movable_indexes) if movable_indexes is not None else None
             routed, failed, vias, moved = board.optimize_wire_routes(
                 scope=self.options.get("scope", "current_side"),
                 allow_cross_side=bool(self.options.get("allow_cross_side", False)),
@@ -1542,6 +1546,8 @@ class MainWindow(QMainWindow):
         self._building_inspector = True
         try:
             self.clear_inspector()
+            if self._pending_route_review is not None:
+                self._inspect_route_review()
             selected = sorted(self.board.selected)
             if len(selected) == 1:
                 kind, idx = selected[0]
@@ -1848,9 +1854,6 @@ class MainWindow(QMainWindow):
         newpart.addRow(pins_btn)
 
     def _inspect_new_wire_tool(self) -> None:
-        if self._pending_route_review is not None:
-            self._inspect_route_review()
-
         _, wire = self._card("Wire mode")
         wire.addRow("Color", self._wire_color_selector(self.board.current_wire_color, self._set_current_wire_color))
         cross_side = QCheckBox("Allow two-point Suggest route to use vias and the other side")
@@ -1871,6 +1874,14 @@ class MainWindow(QMainWindow):
         component_side.setChecked(self.board.allow_route_component_side_changes)
         component_side.toggled.connect(self._set_route_component_side_changes)
         settings.addRow(component_side)
+        move_selected_only = QCheckBox("Move only selected components")
+        move_selected_only.setChecked(self.board.route_move_only_selected_components)
+        move_selected_only.toggled.connect(self._set_route_move_only_selected_components)
+        settings.addRow(move_selected_only)
+        move_hint = QLabel("For cramped boards, select the module you are willing to move (for example the gyro), then use the move-parts optimizer. This prevents headers/controllers from being rearranged unexpectedly.")
+        move_hint.setObjectName("MutedLabel")
+        move_hint.setWordWrap(True)
+        settings.addRow(move_hint)
 
         _, bulk = self._card("Suggest all / optimize")
         if self._route_thread is not None:
@@ -1884,7 +1895,7 @@ class MainWindow(QMainWindow):
         whole_btn.clicked.connect(lambda: self.optimize_wire_routes("whole_board", False, False))
         vias_btn = QPushButton("Optimize whole board + vias")
         vias_btn.clicked.connect(lambda: self.optimize_wire_routes("whole_board", True, False))
-        move_btn = QPushButton("Optimize + vias + move unlocked parts")
+        move_btn = QPushButton("Optimize + vias + move allowed parts")
         move_btn.clicked.connect(lambda: self.optimize_wire_routes("whole_board", True, True))
         bulk.addRow(current_btn)
         bulk.addRow(whole_btn)
@@ -1904,6 +1915,11 @@ class MainWindow(QMainWindow):
     def _set_route_component_side_changes(self, value: bool) -> None:
         self.board.allow_route_component_side_changes = bool(value)
         mode = "may try moving unlocked components to the other side" if value else "keeps components on their current side"
+        self.statusBar().showMessage(f"Suggest all {mode}.")
+
+    def _set_route_move_only_selected_components(self, value: bool) -> None:
+        self.board.route_move_only_selected_components = bool(value)
+        mode = "will only move selected unlocked components" if value else "may move any unlocked component"
         self.statusBar().showMessage(f"Suggest all {mode}.")
 
     def _inspect_route_review(self) -> None:
@@ -2151,6 +2167,9 @@ class MainWindow(QMainWindow):
             "undo_len": len(self.undo_stack),
             "scope": scope,
         }
+        movable_component_indexes = None
+        if allow_move_components and self.board.route_move_only_selected_components:
+            movable_component_indexes = sorted(idx for kind, idx in self.board.selected if kind == "component")
         options = {
             "scope": scope,
             "allow_cross_side": allow_cross_side,
@@ -2160,6 +2179,7 @@ class MainWindow(QMainWindow):
             "hidden_groups": set(self.board.hidden_groups),
             "avoid_wire_overlaps": self.board.avoid_wire_overlaps,
             "allow_component_side_changes": self.board.allow_route_component_side_changes,
+            "movable_component_indexes": movable_component_indexes,
         }
         self._set_route_optimize_running(True)
         scope_text = "current side" if scope == "current_side" else "whole board"
