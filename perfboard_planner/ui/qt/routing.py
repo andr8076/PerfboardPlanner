@@ -678,28 +678,51 @@ class BoardRoutingMixin:
             return None
         return chosen_segments, chosen_vias
 
-    def _route_endpoint_score_for_component(self, comp_idx: int, row: int, col: int, target_indexes: set[int]) -> int:
+    def _route_endpoint_score_for_component(self, comp_idx: int, row: int, col: int, target_indexes: set[int], side: Optional[str] = None) -> int:
         comp = self.layout_model.components[comp_idx]
         current_pins = self._component_pin_points_at(comp, comp.row, comp.col)
         candidate_pins = self._component_pin_points_at(comp, row, col)
         substitutions = {current_pins[name]: candidate_pins[name] for name in current_pins.keys() & candidate_pins.keys()}
+        target_side = side or comp.side
+        side_change_penalty = -3 if target_side != comp.side else 0
         score = 0
         for wire_idx in target_indexes:
             wire = self.layout_model.wires[wire_idx]
             if wire.side != comp.side or len(wire.points) < 2:
                 continue
             start, end = self._wire_endpoint_points(wire)
+            if start not in substitutions and end not in substitutions:
+                continue
             start = substitutions.get(start, start)
             end = substitutions.get(end, end)
-            score += abs(end[0] - start[0]) + abs(end[1] - start[1])
+            score += abs(end[0] - start[0]) + abs(end[1] - start[1]) + side_change_penalty
         return score
 
-    def _apply_component_move_for_routes(self, comp_idx: int, row: int, col: int) -> None:
+    def _apply_component_move_for_routes(self, comp_idx: int, row: int, col: int, side: Optional[str] = None) -> None:
         comp = self.layout_model.components[comp_idx]
+        old_side = comp.side
+        new_side = side or comp.side
         substitutions = self._component_pin_substitutions(comp, comp.row, comp.col, row, col)
         comp.row = row
         comp.col = col
-        self._move_wire_endpoints_for_pin_substitutions(comp.side, substitutions)
+        comp.side = new_side
+        if old_side == new_side:
+            self._move_wire_endpoints_for_pin_substitutions(comp.side, substitutions)
+            return
+        for wire in self.layout_model.wires:
+            if wire.locked or wire.side != old_side or len(wire.points) < 2:
+                continue
+            updated = list(wire.points)
+            touched = False
+            if updated[0] in substitutions:
+                updated[0] = substitutions[updated[0]]
+                touched = True
+            if updated[-1] in substitutions:
+                updated[-1] = substitutions[updated[-1]]
+                touched = True
+            if touched:
+                wire.points = updated
+                wire.side = new_side
 
     def _component_route_move_radius(self, comp) -> int:
         pin_count = len(getattr(comp, "pins", []))
@@ -717,8 +740,18 @@ class BoardRoutingMixin:
         travel_penalty = travel * (2 + pin_count + area // 6)
         return score * 10 + travel_penalty
 
+    def _component_can_move_to_side(self, comp_idx: int, row: int, col: int, side: str) -> bool:
+        comp = self.layout_model.components[comp_idx]
+        old_side = comp.side
+        comp.side = side
+        try:
+            return self._component_can_move_to(comp_idx, row, col)
+        finally:
+            comp.side = old_side
+
     def _move_unlocked_components_for_routes(self, target_indexes: set[int], scope: str) -> int:
         target_sides = {self.side} if scope == "current_side" else {"front", "back"}
+        candidate_sides = {self.side} if scope == "current_side" else {"front", "back"}
         endpoint_points_by_side: dict[str, set[GridPoint]] = {"front": set(), "back": set()}
         for wire_idx in target_indexes:
             wire = self.layout_model.wires[wire_idx]
@@ -740,26 +773,28 @@ class BoardRoutingMixin:
             comp = self.layout_model.components[idx]
             current_score = self._route_endpoint_score_for_component(idx, comp.row, comp.col, target_indexes)
             current_weight = self._component_route_move_weight(comp, current_score, comp.row, comp.col)
-            best = (current_weight, current_score, comp.row, comp.col)
+            best = (current_weight, current_score, comp.row, comp.col, comp.side)
             radius = self._component_route_move_radius(comp)
             min_row = max(0, comp.row - radius)
             max_row = min(self.layout_model.rows - comp.height, comp.row + radius)
             min_col = max(0, comp.col - radius)
             max_col = min(self.layout_model.cols - comp.width, comp.col + radius)
-            for row in range(min_row, max_row + 1):
-                for col in range(min_col, max_col + 1):
-                    if row == comp.row and col == comp.col:
-                        continue
-                    if not self._component_can_move_to(idx, row, col):
-                        continue
-                    score = self._route_endpoint_score_for_component(idx, row, col, target_indexes)
-                    weight = self._component_route_move_weight(comp, score, row, col)
-                    travel = abs(row - comp.row) + abs(col - comp.col)
-                    if (weight, score, travel) < (best[0], best[1], abs(best[2] - comp.row) + abs(best[3] - comp.col)):
-                        best = (weight, score, row, col)
+            sides_to_try = candidate_sides if getattr(self, "allow_route_component_side_changes", False) else {comp.side}
+            for side in sides_to_try:
+                for row in range(min_row, max_row + 1):
+                    for col in range(min_col, max_col + 1):
+                        if row == comp.row and col == comp.col and side == comp.side:
+                            continue
+                        if not self._component_can_move_to_side(idx, row, col, side):
+                            continue
+                        score = self._route_endpoint_score_for_component(idx, row, col, target_indexes, side)
+                        weight = self._component_route_move_weight(comp, score, row, col)
+                        travel = abs(row - comp.row) + abs(col - comp.col)
+                        if (weight, score, travel) < (best[0], best[1], abs(best[2] - comp.row) + abs(best[3] - comp.col)):
+                            best = (weight, score, row, col, side)
             required_gain = max(2, len(getattr(comp, "pins", [])))
             if best[0] <= current_weight - required_gain:
-                self._apply_component_move_for_routes(idx, best[2], best[3])
+                self._apply_component_move_for_routes(idx, best[2], best[3], best[4])
                 moved += 1
         return moved
 

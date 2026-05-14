@@ -73,6 +73,7 @@ class BoardView(BoardRoutingMixin, QWidget):
         self.route_suggestion_points: list[GridPoint] = []
         self.allow_route_suggestion_cross_side = False
         self.avoid_wire_overlaps = False
+        self.allow_route_component_side_changes = False
         self.dragging_view = False
         self.drag_last_pos = QPointF()
         self.drag_start_grid: Optional[GridPoint] = None

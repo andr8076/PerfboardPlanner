@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -213,6 +212,7 @@ class RouteOptimizeWorker(QObject):
                 hidden_groups=set(self.options.get("hidden_groups", set())),
                 avoid_wire_overlaps=bool(self.options.get("avoid_wire_overlaps", False)),
             )
+            board.allow_route_component_side_changes = bool(self.options.get("allow_component_side_changes", False))
             routed, failed, vias, moved = board.optimize_wire_routes(
                 scope=self.options.get("scope", "current_side"),
                 allow_cross_side=bool(self.options.get("allow_cross_side", False)),
@@ -252,6 +252,7 @@ class MainWindow(QMainWindow):
         self._route_thread: QThread | None = None
         self._route_worker: RouteOptimizeWorker | None = None
         self._route_job_state: dict | None = None
+        self._pending_route_review: dict | None = None
         self._build_ui()
         self._wire_events()
         self.autosave_timer = QTimer(self)
@@ -322,30 +323,6 @@ class MainWindow(QMainWindow):
         self.footer_route_button.setVisible(False)
         footer_layout.addWidget(self.footer_route_button)
 
-        self.footer_no_overlap_button = QToolButton()
-        self.footer_no_overlap_button.setText("No overlaps")
-        self.footer_no_overlap_button.setToolTip("When enabled, suggested routes may cross existing wires but will not run on top of same-direction wire spans.")
-        self.footer_no_overlap_button.setCheckable(True)
-        self.footer_no_overlap_button.setVisible(False)
-        footer_layout.addWidget(self.footer_no_overlap_button)
-
-        self.footer_optimize_button = QToolButton()
-        self.footer_optimize_button.setText("Suggest all")
-        self.footer_optimize_button.setToolTip("Draw direct endpoint wires first, then reroute them into solder-friendly paths while keeping endpoints")
-        self.footer_optimize_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.footer_optimize_button.setVisible(False)
-        optimize_menu = QMenu(self.footer_optimize_button)
-        self.optimize_current_side_action = QAction("Optimize current side", self)
-        self.optimize_whole_board_action = QAction("Optimize whole board", self)
-        self.optimize_with_vias_action = QAction("Optimize whole board + allow vias", self)
-        self.optimize_move_parts_action = QAction("Optimize whole board + vias + move unlocked parts", self)
-        optimize_menu.addAction(self.optimize_current_side_action)
-        optimize_menu.addAction(self.optimize_whole_board_action)
-        optimize_menu.addSeparator()
-        optimize_menu.addAction(self.optimize_with_vias_action)
-        optimize_menu.addAction(self.optimize_move_parts_action)
-        self.footer_optimize_button.setMenu(optimize_menu)
-        footer_layout.addWidget(self.footer_optimize_button)
         footer_layout.addStretch(1)
         self.zoom_out_button = QToolButton(); self.zoom_out_button.setText("−"); self.zoom_out_button.setToolTip("Zoom out")
         self.zoom_label = QLabel("100%")
@@ -630,11 +607,6 @@ class MainWindow(QMainWindow):
         self.clear_muted_warnings_button.clicked.connect(self.clear_muted_warnings)
         self.show_all_colors_btn.clicked.connect(self.show_all_wire_colors)
         self.footer_route_button.clicked.connect(self.start_route_suggestion)
-        self.footer_no_overlap_button.toggled.connect(self._set_avoid_wire_overlaps)
-        self.optimize_current_side_action.triggered.connect(lambda: self.optimize_wire_routes("current_side", False))
-        self.optimize_whole_board_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", False))
-        self.optimize_with_vias_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", True))
-        self.optimize_move_parts_action.triggered.connect(lambda: self.optimize_wire_routes("whole_board", True, True))
         self.library_list.itemDoubleClicked.connect(self.apply_library_preset)
         self.group_list.itemClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
         self.group_list.itemDoubleClicked.connect(lambda item: self.select_group(item.data(Qt.ItemDataRole.UserRole)))
@@ -674,9 +646,6 @@ class MainWindow(QMainWindow):
             self.mode_actions[tool].setChecked(True)
         if hasattr(self, "footer_route_button"):
             self.footer_route_button.setVisible(tool == "wire")
-            self.footer_no_overlap_button.setVisible(tool == "wire")
-            self.footer_no_overlap_button.setChecked(self.board.avoid_wire_overlaps)
-            self.footer_optimize_button.setVisible(tool == "wire")
             self.update_route_button()
         self.statusBar().showMessage(f"Mode: {tool}")
         self.populate_inspector()
@@ -1675,8 +1644,6 @@ class MainWindow(QMainWindow):
         active = bool(getattr(self.board, "route_suggestion_active", False))
         self.footer_route_button.setText("Cancel suggested route" if active else "Suggest route: click two points")
         self.footer_route_button.setStyleSheet(f"QToolButton {{background:{color.name()}; color:{fg}; border-radius:10px; padding:7px 14px; font-weight:800; border:1px solid rgba(15,23,42,0.20);}} QToolButton:hover {{border:2px solid #0f172a;}}")
-        if hasattr(self, "footer_optimize_button"):
-            self.footer_optimize_button.setStyleSheet("QToolButton {background:#0f172a; color:#ffffff; border-radius:10px; padding:7px 14px; font-weight:800;} QToolButton:hover {background:#1e293b;}")
 
     def _wire_color_selector(self, value: str, changed) -> QWidget:
         row = QWidget()
@@ -1881,20 +1848,48 @@ class MainWindow(QMainWindow):
         newpart.addRow(pins_btn)
 
     def _inspect_new_wire_tool(self) -> None:
+        if self._pending_route_review is not None:
+            self._inspect_route_review()
+
         _, wire = self._card("Wire mode")
         wire.addRow("Color", self._wire_color_selector(self.board.current_wire_color, self._set_current_wire_color))
-        cross_side = QCheckBox("Allow Suggest route to use vias and the other side")
+        cross_side = QCheckBox("Allow two-point Suggest route to use vias and the other side")
         cross_side.setChecked(self.board.allow_route_suggestion_cross_side)
         cross_side.toggled.connect(self._set_route_suggestion_cross_side)
         wire.addRow(cross_side)
-        no_overlap = QCheckBox("No wire overlaps (crossings still allowed)")
-        no_overlap.setChecked(self.board.avoid_wire_overlaps)
-        no_overlap.toggled.connect(self._set_avoid_wire_overlaps)
-        wire.addRow(no_overlap)
-        hint = QLabel("Use the bottom-bar Suggest route button, then click two board holes or pins. When cross-side routing is enabled, the suggestion may add vias and a same-color segment on the opposite side if that route is shorter or safer. Enable No overlaps when a project must never place two same-direction wire runs on top of each other.")
+        hint = QLabel("The only bottom-board routing control is Suggest route between two points. Bulk routing lives here so the board view stays clear.")
         hint.setObjectName("MutedLabel")
         hint.setWordWrap(True)
         wire.addRow(hint)
+
+        _, settings = self._card("Router settings")
+        no_overlap = QCheckBox("No wire overlaps (crossings still allowed)")
+        no_overlap.setChecked(self.board.avoid_wire_overlaps)
+        no_overlap.toggled.connect(self._set_avoid_wire_overlaps)
+        settings.addRow(no_overlap)
+        component_side = QCheckBox("Allow movable components to try the other side")
+        component_side.setChecked(self.board.allow_route_component_side_changes)
+        component_side.toggled.connect(self._set_route_component_side_changes)
+        settings.addRow(component_side)
+
+        _, bulk = self._card("Suggest all / optimize")
+        if self._route_thread is not None:
+            running = QLabel("Optimizing routes in the background…")
+            running.setObjectName("MutedLabel")
+            bulk.addRow(running)
+            return
+        current_btn = QPushButton("Optimize current side")
+        current_btn.clicked.connect(lambda: self.optimize_wire_routes("current_side", False, False))
+        whole_btn = QPushButton("Optimize whole board")
+        whole_btn.clicked.connect(lambda: self.optimize_wire_routes("whole_board", False, False))
+        vias_btn = QPushButton("Optimize whole board + vias")
+        vias_btn.clicked.connect(lambda: self.optimize_wire_routes("whole_board", True, False))
+        move_btn = QPushButton("Optimize + vias + move unlocked parts")
+        move_btn.clicked.connect(lambda: self.optimize_wire_routes("whole_board", True, True))
+        bulk.addRow(current_btn)
+        bulk.addRow(whole_btn)
+        bulk.addRow(vias_btn)
+        bulk.addRow(move_btn)
 
     def _set_route_suggestion_cross_side(self, value: bool) -> None:
         self.board.allow_route_suggestion_cross_side = bool(value)
@@ -1903,12 +1898,48 @@ class MainWindow(QMainWindow):
 
     def _set_avoid_wire_overlaps(self, value: bool) -> None:
         self.board.avoid_wire_overlaps = bool(value)
-        if hasattr(self, "footer_no_overlap_button"):
-            self.footer_no_overlap_button.blockSignals(True)
-            self.footer_no_overlap_button.setChecked(self.board.avoid_wire_overlaps)
-            self.footer_no_overlap_button.blockSignals(False)
         mode = "will not overlap same-direction wire spans" if value else "may reuse wire spans when necessary"
         self.statusBar().showMessage(f"Suggest route {mode}.")
+
+    def _set_route_component_side_changes(self, value: bool) -> None:
+        self.board.allow_route_component_side_changes = bool(value)
+        mode = "may try moving unlocked components to the other side" if value else "keeps components on their current side"
+        self.statusBar().showMessage(f"Suggest all {mode}.")
+
+    def _inspect_route_review(self) -> None:
+        review = self._pending_route_review
+        if not review:
+            return
+        _, form = self._card("Review suggested routing")
+        label = QLabel(str(review.get("summary", "Suggested routing is visible on the board.")))
+        label.setWordWrap(True)
+        form.addRow(label)
+        keep_btn = QPushButton("Keep suggested routing")
+        reject_btn = QPushButton("Reject and restore previous routing")
+        keep_btn.clicked.connect(self.keep_route_suggestion)
+        reject_btn.clicked.connect(self.reject_route_suggestion)
+        form.addRow(keep_btn)
+        form.addRow(reject_btn)
+
+    def keep_route_suggestion(self) -> None:
+        if self._pending_route_review is None:
+            return
+        summary = str(self._pending_route_review.get("summary", "Suggested routing kept."))
+        self._pending_route_review = None
+        self.populate_inspector()
+        self.statusBar().showMessage(summary)
+
+    def reject_route_suggestion(self) -> None:
+        review = self._pending_route_review
+        if not review:
+            return
+        self.layout_model = layout_from_dict(review["before"])
+        self.board.set_layout(self.layout_model)
+        self.undo_stack = self.undo_stack[: int(review.get("undo_len", len(self.undo_stack)))]
+        self._set_dirty(bool(review.get("was_dirty", self.is_dirty)))
+        self._pending_route_review = None
+        self._refresh_all()
+        self.statusBar().showMessage("Suggest all rejected; previous routing restored.")
 
     def _inspect_new_keepout_tool(self) -> None:
         _, keepout = self._card("Keepout mode")
@@ -2105,11 +2136,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded template: {data.get('label', item.text())}")
 
     def _set_route_optimize_running(self, running: bool) -> None:
-        for action in (self.optimize_current_side_action, self.optimize_whole_board_action, self.optimize_with_vias_action, self.optimize_move_parts_action):
-            action.setEnabled(not running)
-        self.footer_optimize_button.setEnabled(not running)
         self.footer_route_button.setEnabled(not running)
-        self.footer_no_overlap_button.setEnabled(not running)
+        self.populate_inspector()
 
     def optimize_wire_routes(self, scope: str, allow_cross_side: bool, allow_move_components: bool = False) -> None:
         if self._route_thread is not None:
@@ -2131,6 +2159,7 @@ class MainWindow(QMainWindow):
             "hidden_wire_colors": set(self.board.hidden_wire_colors),
             "hidden_groups": set(self.board.hidden_groups),
             "avoid_wire_overlaps": self.board.avoid_wire_overlaps,
+            "allow_component_side_changes": self.board.allow_route_component_side_changes,
         }
         self._set_route_optimize_running(True)
         scope_text = "current side" if scope == "current_side" else "whole board"
@@ -2190,22 +2219,16 @@ class MainWindow(QMainWindow):
             self.layout_model = layout_from_dict(result["layout"])
             self.board.set_layout(self.layout_model)
             self._set_dirty(True)
+            self._pending_route_review = {
+                "before": before,
+                "was_dirty": was_dirty,
+                "undo_len": undo_len,
+                "summary": summary,
+            }
+            self.set_tool("wire")
             self._refresh_all()
-            reply = QMessageBox.question(
-                self,
-                "Review suggested routing",
-                summary + "\n\nThe proposed routes are visible on the board now. Keep these changes?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                self.layout_model = layout_from_dict(before)
-                self.board.set_layout(self.layout_model)
-                self.undo_stack = self.undo_stack[:undo_len]
-                self._set_dirty(was_dirty)
-                self._refresh_all()
-                self.statusBar().showMessage("Suggest all rejected; previous routing restored.")
-                return
+            self.statusBar().showMessage(summary + " Review it in the inspector without blocking the board view.")
+            return
         self.statusBar().showMessage(summary)
 
     @Slot(str)
