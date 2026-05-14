@@ -71,6 +71,7 @@ class BoardView(QWidget):
         self.current_keepout_color = "#ef4444"
         self.route_suggestion_active = False
         self.route_suggestion_points: list[GridPoint] = []
+        self.allow_route_suggestion_cross_side = False
         self.dragging_view = False
         self.drag_last_pos = QPointF()
         self.drag_start_grid: Optional[GridPoint] = None
@@ -538,10 +539,9 @@ class BoardView(QWidget):
     ) -> list[GridPoint]:
         """Find a safe orthogonal route without runaway memory use.
 
-        Component bodies and keepout cells are hard blocks, except for the two
-        explicit endpoints. Existing wire cells are not blocked, but they are
-        expensive, so the route avoids them when a clean alternative exists.
-        """
+        Component bodies, keepout cells, and already-routed wire cells are hard
+        blocks, except for the two explicit endpoints. This keeps generated
+        wires from being stacked on top of existing wires.        """
         if start == end:
             return [start]
         rows = self.layout_model.rows
@@ -587,12 +587,12 @@ class BoardView(QWidget):
                 nxt = (nr, nc)
                 if not board_contains(nr, nc, rows, cols) or nxt in blocked:
                     continue
+                if nxt in wire_cells and nxt not in {start, end}:
+                    continue
 
                 step_cost = 10
-                if nxt in wire_cells and nxt not in {start, end}:
-                    step_cost += 22
                 if prev_dir is not None and direction != prev_dir:
-                    step_cost += 4
+                    step_cost += 14
 
                 next_g = current_g + step_cost
                 next_state: State = (nxt, direction)
@@ -623,9 +623,36 @@ class BoardView(QWidget):
     def _suggest_route(self, start: GridPoint, end: GridPoint) -> list[GridPoint]:
         return self._suggest_route_on_side(start, end, self.side)
 
-    def _route_cost(self, route: list[GridPoint]) -> int:
-        if not route or len(route) < 2:
-            return 10**9
+    def _suggest_route_plan(self, start: GridPoint, end: GridPoint) -> tuple[list[tuple[list[GridPoint], str]], list[GridPoint]]:
+        helper_wire = Wire("", [start, end], self.current_wire_color, side=self.side)
+        direct = self._suggest_route_on_side(start, end, self.side)
+        direct_score = self._route_cost(direct, helper_wire) if len(direct) >= 2 else 10**9
+        via_choice = None
+        if self.allow_route_suggestion_cross_side:
+            occupied_by_side = {
+                "front": self._wire_cells_from_wires(self.layout_model.wires, "front"),
+                "back": self._wire_cells_from_wires(self.layout_model.wires, "back"),
+            }
+            via_choice = self._best_cross_side_route(
+                helper_wire,
+                start,
+                end,
+                target_indexes=set(),
+                occupied_by_side=occupied_by_side,
+            )
+
+        if via_choice is not None and via_choice[0] < direct_score:
+            _, via_a, via_b, route_a, route_b, route_c = via_choice
+            other_side = "back" if self.side == "front" else "front"
+            return (
+                [(route_a, self.side), (route_b, other_side), (route_c, self.side)],
+                [via_a, via_b],
+            )
+        if len(direct) >= 2:
+            return ([(direct, self.side)], [])
+        return ([], [])
+
+    def _route_metrics(self, route: list[GridPoint]) -> tuple[int, int]:
         length = 0
         bends = 0
         prev_dir: Optional[tuple[int, int]] = None
@@ -635,7 +662,35 @@ class BoardView(QWidget):
             if prev_dir is not None and direction != prev_dir:
                 bends += 1
             prev_dir = direction
-        return length * 10 + bends * 4
+        return length, bends
+
+    def _wire_is_power_ground_or_rail(self, wire: Wire) -> bool:
+        label = f"{wire.name} {wire.group}".lower()
+        power_tokens = ("gnd", "ground", "vcc", "vdd", "vss", "+5", "5v", "3v3", "3.3v", "vin", "vbat", "power", "rail")
+        if any(token in label for token in power_tokens):
+            return True
+        if len(wire.points) < 2:
+            return False
+        start, end = wire.points[0], wire.points[-1]
+        length = abs(end[0] - start[0]) + abs(end[1] - start[1])
+        straight = start[0] == end[0] or start[1] == end[1]
+        near_edge = (
+            start[0] <= 1 and end[0] <= 1
+            or start[0] >= self.layout_model.rows - 2 and end[0] >= self.layout_model.rows - 2
+            or start[1] <= 1 and end[1] <= 1
+            or start[1] >= self.layout_model.cols - 2 and end[1] >= self.layout_model.cols - 2
+        )
+        return straight and near_edge and length >= max(6, max(self.layout_model.rows, self.layout_model.cols) // 3)
+
+    def _route_cost(self, route: list[GridPoint], wire: Optional[Wire] = None, *, via_count: int = 0) -> int:
+        if not route or len(route) < 2:
+            return 10**9
+        length, bends = self._route_metrics(route)
+        bend_penalty = 24 if wire is not None and self._wire_is_power_ground_or_rail(wire) else 16
+        # Solderability score: short jumpers are best, bends cost time and
+        # mistakes, and vias are deliberately expensive so cross-side routing
+        # wins only when it materially improves or unblocks the route.
+        return length * 10 + bends * bend_penalty + via_count * 95
 
     def _route_cells(self, route: list[GridPoint]) -> set[GridPoint]:
         cells: set[GridPoint] = set()
@@ -656,7 +711,11 @@ class BoardView(QWidget):
             group=source.group,
         )
 
-    def _candidate_via_points(self, start: GridPoint, end: GridPoint, side: str, other_side: str, limit: int = 18) -> list[GridPoint]:
+    def _candidate_via_points(self, start: GridPoint, end: GridPoint, side: str, other_side: str, limit: Optional[int] = None) -> list[GridPoint]:
+        if limit is None:
+            # Small boards only need a handful of options, but larger or more
+            # congested layouts benefit from a wider search around the corridor.
+            limit = min(64, max(18, (self.layout_model.rows + self.layout_model.cols) // 2))
         blocked_side = self._route_blocked_cells_for_side(side, start, end)
         blocked_other = self._route_blocked_cells_for_side(other_side, start, end)
         rows, cols = self.layout_model.rows, self.layout_model.cols
@@ -674,6 +733,40 @@ class BoardView(QWidget):
                 candidates.append((dist_to_ends * 8 + corridor, pt))
         candidates.sort(key=lambda item: item[0])
         return [pt for _, pt in candidates[:limit]]
+
+    def _route_endpoint_freedom(self, point: GridPoint, side: str, other_endpoint: GridPoint) -> int:
+        blocked = self._route_blocked_cells_for_side(side, point, other_endpoint)
+        rows, cols = self.layout_model.rows, self.layout_model.cols
+        free = 0
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr, nc = point[0] + dr, point[1] + dc
+            if board_contains(nr, nc, rows, cols) and (nr, nc) not in blocked:
+                free += 1
+        return free
+
+    def _wire_route_priority(self, wire: Wire) -> tuple[int, int, int, int]:
+        start, end = wire.points[0], wire.points[-1]
+        start_free = self._route_endpoint_freedom(start, wire.side, end)
+        end_free = self._route_endpoint_freedom(end, wire.side, start)
+        manhattan = abs(end[0] - start[0]) + abs(end[1] - start[1])
+        min_free = min(start_free, end_free)
+        if self._wire_is_power_ground_or_rail(wire):
+            bucket = 0
+            distance_tiebreak = -manhattan
+        elif min_free <= 1:
+            bucket = 1
+            distance_tiebreak = -manhattan
+        elif manhattan <= max(4, min(self.layout_model.rows, self.layout_model.cols) // 4):
+            bucket = 2
+            distance_tiebreak = manhattan
+        else:
+            bucket = 3
+            distance_tiebreak = -manhattan
+        # Routing order follows the preferred manual workflow: draw direct
+        # endpoint wires, then optimize rails first, constrained pins next,
+        # short local jumpers next, and flexible signal runs last.
+        return (bucket, min_free, start_free + end_free, distance_tiebreak)
+
 
     def _best_cross_side_route(
         self,
@@ -706,18 +799,273 @@ class BoardView(QWidget):
                 route_c = self._suggest_route_on_side(via_b, end, side, ignore_wire_indexes=target_indexes, extra_occupied=occ_side_a)
                 if len(route_c) < 2:
                     continue
-                score = self._route_cost(route_a) + self._route_cost(route_b) + self._route_cost(route_c) + 55
+                score = self._route_cost(route_a, wire) + self._route_cost(route_b, wire) + self._route_cost(route_c, wire, via_count=2)
                 if best is None or score < best[0]:
                     best = (score, via_a, via_b, route_a, route_b, route_c)
         return best
 
-    def optimize_wire_routes(self, *, scope: str = "current_side", allow_cross_side: bool = False) -> tuple[int, int, int]:
+    def _target_net_groups(self, target_indexes: set[int], wires: list[Wire]) -> list[set[int]]:
+        by_key: dict[tuple[str, str, str], list[int]] = {}
+        for idx in target_indexes:
+            wire = wires[idx]
+            by_key.setdefault((wire.side, wire.color, wire.group), []).append(idx)
+
+        groups: list[set[int]] = []
+        for indexes in by_key.values():
+            remaining = set(indexes)
+            while remaining:
+                seed = remaining.pop()
+                group = {seed}
+                endpoints = {wires[seed].points[0], wires[seed].points[-1]}
+                changed = True
+                while changed:
+                    changed = False
+                    for idx in list(remaining):
+                        pts = {wires[idx].points[0], wires[idx].points[-1]}
+                        if endpoints & pts:
+                            remaining.remove(idx)
+                            group.add(idx)
+                            endpoints.update(pts)
+                            changed = True
+                if len(group) > 1:
+                    groups.append(group)
+        return groups
+
+    def _route_connection_segments(
+        self,
+        source: Wire,
+        start: GridPoint,
+        end: GridPoint,
+        *,
+        target_indexes: set[int],
+        occupied_by_side: Dict[str, set[GridPoint]],
+        allow_cross_side: bool,
+    ) -> Optional[tuple[int, list[Wire], list[GridPoint]]]:
+        direct = self._suggest_route_on_side(
+            start,
+            end,
+            source.side,
+            ignore_wire_indexes=target_indexes,
+            extra_occupied=occupied_by_side.get(source.side, set()),
+        )
+        direct_score = self._route_cost(direct, source) if len(direct) >= 2 else 10**9
+        via_choice = None
+        if allow_cross_side:
+            via_choice = self._best_cross_side_route(source, start, end, target_indexes=target_indexes, occupied_by_side=occupied_by_side)
+
+        if via_choice is not None and via_choice[0] < direct_score:
+            _, via_a, via_b, route_a, route_b, route_c = via_choice
+            other_side = "back" if source.side == "front" else "front"
+            return (
+                via_choice[0],
+                [
+                    self._copy_wire_with_route(source, route_a, source.side),
+                    self._copy_wire_with_route(source, route_b, other_side),
+                    self._copy_wire_with_route(source, route_c, source.side),
+                ],
+                [via_a, via_b],
+            )
+        if len(direct) >= 2:
+            return (direct_score, [self._copy_wire_with_route(source, direct, source.side)], [])
+        return None
+
+    def _route_net_topology(
+        self,
+        group: set[int],
+        original_wires: list[Wire],
+        *,
+        target_indexes: set[int],
+        occupied_by_side: Dict[str, set[GridPoint]],
+        allow_cross_side: bool,
+    ) -> Optional[tuple[list[Wire], list[GridPoint]]]:
+        points = sorted({pt for idx in group for pt in (original_wires[idx].points[0], original_wires[idx].points[-1])})
+        if len(points) < 3 or len(points) > 8 or len(group) != len(points) - 1:
+            return None
+
+        source = original_wires[min(group)]
+        edges: list[tuple[int, int, int, list[Wire], list[GridPoint]]] = []
+        for a_idx, start in enumerate(points):
+            for b_idx in range(a_idx + 1, len(points)):
+                end = points[b_idx]
+                plan = self._route_connection_segments(
+                    source,
+                    start,
+                    end,
+                    target_indexes=target_indexes,
+                    occupied_by_side=occupied_by_side,
+                    allow_cross_side=allow_cross_side,
+                )
+                if plan is None:
+                    continue
+                score, segments, vias = plan
+                edges.append((score, a_idx, b_idx, segments, vias))
+        if len(edges) < len(points) - 1:
+            return None
+
+        parent = list(range(len(points)))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        chosen_segments: list[Wire] = []
+        chosen_vias: list[GridPoint] = []
+        chosen_edges = 0
+        topology_occupied: Dict[str, set[GridPoint]] = {side: set(cells) for side, cells in occupied_by_side.items()}
+        for _, a_idx, b_idx, _segments, _vias in sorted(edges, key=lambda item: item[0]):
+            root_a = find(a_idx)
+            root_b = find(b_idx)
+            if root_a == root_b:
+                continue
+            # Re-plan against the segments already chosen for this net, so an
+            # equivalent A-C-B topology does not stack its own new wires.
+            replanned = self._route_connection_segments(
+                source,
+                points[a_idx],
+                points[b_idx],
+                target_indexes=target_indexes,
+                occupied_by_side=topology_occupied,
+                allow_cross_side=allow_cross_side,
+            )
+            if replanned is None:
+                continue
+            _, segments, vias = replanned
+            parent[root_b] = root_a
+            chosen_segments.extend(segments)
+            chosen_vias.extend(vias)
+            for segment in segments:
+                topology_occupied.setdefault(segment.side, set()).update(self._route_cells(segment.points))
+            chosen_edges += 1
+            if chosen_edges >= len(points) - 1:
+                break
+
+        if len({find(i) for i in range(len(points))}) != 1:
+            return None
+        return chosen_segments, chosen_vias
+
+    def _component_body_cells_at(self, comp: Component, row: int, col: int) -> set[GridPoint]:
+        return {
+            (r, c)
+            for r in range(row, row + comp.height)
+            for c in range(col, col + comp.width)
+            if board_contains(r, c, self.layout_model.rows, self.layout_model.cols)
+        }
+
+    def _component_pin_points_at(self, comp: Component, row: int, col: int) -> dict[str, GridPoint]:
+        return {pin.name: (row + pin.row, col + pin.col) for pin in comp.pins}
+
+    def _component_can_move_to(self, comp_idx: int, row: int, col: int) -> bool:
+        comp = self.layout_model.components[comp_idx]
+        if row < 0 or col < 0 or row + comp.height > self.layout_model.rows or col + comp.width > self.layout_model.cols:
+            return False
+        candidate = self._component_body_cells_at(comp, row, col)
+        for other_idx, other in enumerate(self.layout_model.components):
+            if other_idx == comp_idx or other.side != comp.side or self._is_item_hidden_by_group(other):
+                continue
+            other_cells = self._component_body_cells_at(other, other.row, other.col)
+            if candidate & other_cells:
+                return False
+        for zone in self.layout_model.keepouts:
+            if self._is_item_hidden_by_group(zone) or zone.side not in {"both", comp.side}:
+                continue
+            r1, r2 = sorted((zone.row1, zone.row2)); c1, c2 = sorted((zone.col1, zone.col2))
+            for point in candidate:
+                if r1 <= point[0] <= r2 and c1 <= point[1] <= c2:
+                    return False
+        return True
+
+    def _wire_endpoint_points(self, wire: Wire) -> tuple[GridPoint, GridPoint]:
+        return wire.points[0], wire.points[-1]
+
+    def _component_has_locked_wire_endpoint(self, comp_idx: int) -> bool:
+        comp = self.layout_model.components[comp_idx]
+        pin_points = set(self._component_pin_points_at(comp, comp.row, comp.col).values())
+        for wire in self.layout_model.wires:
+            if not wire.locked or wire.side != comp.side or len(wire.points) < 2:
+                continue
+            if set(self._wire_endpoint_points(wire)) & pin_points:
+                return True
+        return False
+
+    def _route_endpoint_score_for_component(self, comp_idx: int, row: int, col: int, target_indexes: set[int]) -> int:
+        comp = self.layout_model.components[comp_idx]
+        current_pins = self._component_pin_points_at(comp, comp.row, comp.col)
+        candidate_pins = self._component_pin_points_at(comp, row, col)
+        substitutions = {current_pins[name]: candidate_pins[name] for name in current_pins.keys() & candidate_pins.keys()}
+        score = 0
+        for wire_idx in target_indexes:
+            wire = self.layout_model.wires[wire_idx]
+            if wire.side != comp.side or len(wire.points) < 2:
+                continue
+            start, end = self._wire_endpoint_points(wire)
+            start = substitutions.get(start, start)
+            end = substitutions.get(end, end)
+            score += abs(end[0] - start[0]) + abs(end[1] - start[1])
+        return score
+
+    def _apply_component_move_for_routes(self, comp_idx: int, row: int, col: int) -> None:
+        comp = self.layout_model.components[comp_idx]
+        old_pins = self._component_pin_points_at(comp, comp.row, comp.col)
+        new_pins = self._component_pin_points_at(comp, row, col)
+        substitutions = {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+        comp.row = row
+        comp.col = col
+        for wire in self.layout_model.wires:
+            if wire.side != comp.side or len(wire.points) < 2:
+                continue
+            updated = list(wire.points)
+            updated[0] = substitutions.get(updated[0], updated[0])
+            updated[-1] = substitutions.get(updated[-1], updated[-1])
+            wire.points = updated
+
+    def _move_unlocked_components_for_routes(self, target_indexes: set[int], scope: str) -> int:
+        target_sides = {self.side} if scope == "current_side" else {"front", "back"}
+        endpoint_points_by_side: dict[str, set[GridPoint]] = {"front": set(), "back": set()}
+        for wire_idx in target_indexes:
+            wire = self.layout_model.wires[wire_idx]
+            if len(wire.points) >= 2:
+                endpoint_points_by_side.setdefault(wire.side, set()).update(self._wire_endpoint_points(wire))
+
+        movable = []
+        for idx, comp in enumerate(self.layout_model.components):
+            if comp.locked or comp.side not in target_sides or self._is_item_hidden_by_group(comp):
+                continue
+            if self._component_has_locked_wire_endpoint(idx):
+                continue
+            pin_points = set(self._component_pin_points_at(comp, comp.row, comp.col).values())
+            if pin_points & endpoint_points_by_side.get(comp.side, set()):
+                movable.append(idx)
+
+        moved = 0
+        for idx in sorted(movable, key=lambda comp_idx: self._route_endpoint_score_for_component(comp_idx, self.layout_model.components[comp_idx].row, self.layout_model.components[comp_idx].col, target_indexes), reverse=True):
+            comp = self.layout_model.components[idx]
+            current_score = self._route_endpoint_score_for_component(idx, comp.row, comp.col, target_indexes)
+            best = (current_score, comp.row, comp.col)
+            for row in range(0, self.layout_model.rows - comp.height + 1):
+                for col in range(0, self.layout_model.cols - comp.width + 1):
+                    if row == comp.row and col == comp.col:
+                        continue
+                    if not self._component_can_move_to(idx, row, col):
+                        continue
+                    score = self._route_endpoint_score_for_component(idx, row, col, target_indexes)
+                    travel = abs(row - comp.row) + abs(col - comp.col)
+                    if (score, travel) < (best[0], abs(best[1] - comp.row) + abs(best[2] - comp.col)):
+                        best = (score, row, col)
+            if best[0] < current_score:
+                self._apply_component_move_for_routes(idx, best[1], best[2])
+                moved += 1
+        return moved
+
+    def optimize_wire_routes(self, *, scope: str = "current_side", allow_cross_side: bool = False, allow_move_components: bool = False) -> tuple[int, int, int, int]:
         """Reroute existing wires while preserving their endpoints.
 
-        Returns (updated_wire_count, failed_wire_count, added_via_count).  Scope
-        is either ``current_side`` or ``whole_board``.  If cross-side routing is
-        allowed, a wire may be split into same-color segments on both sides with
-        vias inserted at the transitions.
+        Returns (updated_wire_count, failed_wire_count, added_via_count, moved_component_count).
+        Scope is either ``current_side`` or ``whole_board``. If cross-side routing
+        is allowed, a wire may be split into same-color segments on both sides
+        with vias inserted at the transitions. If component movement is allowed,
+        unlocked components may move on their existing side before routing.
         """
         if scope not in {"current_side", "whole_board"}:
             scope = "current_side"
@@ -729,9 +1077,10 @@ class BoardView(QWidget):
             and (scope == "whole_board" or wire.side == self.side)
         }
         if not target_indexes:
-            return (0, 0, 0)
+            return (0, 0, 0, 0)
 
         self.beforeLayoutChange.emit("Suggest all wires")
+        moved_components = self._move_unlocked_components_for_routes(target_indexes, scope) if allow_move_components else 0
         original_wires = list(self.layout_model.wires)
         new_wires: list[Wire] = []
         kept_wires = [wire for i, wire in enumerate(original_wires) if i not in target_indexes]
@@ -743,55 +1092,82 @@ class BoardView(QWidget):
         failed = 0
         added_vias = 0
 
-        for i, source in enumerate(original_wires):
-            if i not in target_indexes:
-                new_wires.append(source)
+        routed_segments: dict[int, list[Wire]] = {}
+        failed_indexes: set[int] = set()
+        consumed_indexes: set[int] = set()
+        target_order = sorted(target_indexes, key=lambda idx: self._wire_route_priority(original_wires[idx]))
+
+        def add_vias(points: Iterable[GridPoint], source: Wire) -> int:
+            count = 0
+            for point in points:
+                if not self._via_exists(point):
+                    self.layout_model.vias.append(Via(point[0], point[1], color=source.color, group=source.group))
+                    count += 1
+            return count
+
+        def reserve_segments(segments: list[Wire]) -> None:
+            for seg in segments:
+                occupied_by_side.setdefault(seg.side, set()).update(self._route_cells(seg.points))
+
+        for group in sorted(self._target_net_groups(target_indexes, original_wires), key=lambda grp: min(target_order.index(idx) for idx in grp)):
+            if group & consumed_indexes:
                 continue
+            topology = self._route_net_topology(
+                group,
+                original_wires,
+                target_indexes=target_indexes,
+                occupied_by_side=occupied_by_side,
+                allow_cross_side=allow_cross_side,
+            )
+            if topology is None:
+                continue
+            segments, via_points = topology
+            anchor = min(group)
+            source = original_wires[anchor]
+            added_vias += add_vias(via_points, source)
+            reserve_segments(segments)
+            routed_segments[anchor] = segments
+            consumed_indexes.update(group)
+            routed += len(group)
+
+        for i in target_order:
+            if i in consumed_indexes:
+                continue
+            source = original_wires[i]
             start, end = source.points[0], source.points[-1]
-            direct = self._suggest_route_on_side(
+            plan = self._route_connection_segments(
+                source,
                 start,
                 end,
-                source.side,
-                ignore_wire_indexes=target_indexes,
-                extra_occupied=occupied_by_side.get(source.side, set()),
+                target_indexes=target_indexes,
+                occupied_by_side=occupied_by_side,
+                allow_cross_side=allow_cross_side,
             )
-            direct_score = self._route_cost(direct) if len(direct) >= 2 else 10**9
-            via_choice = None
-            if allow_cross_side:
-                via_choice = self._best_cross_side_route(source, start, end, target_indexes=target_indexes, occupied_by_side=occupied_by_side)
+            if plan is not None:
+                _, segments, via_points = plan
+                added_vias += add_vias(via_points, source)
+                reserve_segments(segments)
+                routed_segments[i] = segments
+                routed += 1
+        else:
+            occupied_by_side.setdefault(source.side, set()).update(self._route_cells(source.points))
+            failed_indexes.add(i)
+            failed += 1
 
-            if via_choice is not None and via_choice[0] < direct_score:
-                _, via_a, via_b, route_a, route_b, route_c = via_choice
-                for point in (via_a, via_b):
-                    if not self._via_exists(point):
-                        self.layout_model.vias.append(Via(point[0], point[1], color=source.color, group=source.group))
-                        added_vias += 1
-                other_side = "back" if source.side == "front" else "front"
-                segments = [
-                    self._copy_wire_with_route(source, route_a, source.side),
-                    self._copy_wire_with_route(source, route_b, other_side),
-                    self._copy_wire_with_route(source, route_c, source.side),
-                ]
-                for seg in segments:
-                    new_wires.append(seg)
-                    occupied_by_side.setdefault(seg.side, set()).update(self._route_cells(seg.points))
-                routed += 1
-            elif len(direct) >= 2:
-                wire = self._copy_wire_with_route(source, direct, source.side)
-                new_wires.append(wire)
-                occupied_by_side.setdefault(wire.side, set()).update(self._route_cells(wire.points))
-                routed += 1
-            else:
+        for i, source in enumerate(original_wires):
+            if i in routed_segments:
+                new_wires.extend(routed_segments[i])
+            elif i in consumed_indexes:
+                continue
+            elif i in failed_indexes or i not in target_indexes:
                 new_wires.append(source)
-                occupied_by_side.setdefault(source.side, set()).update(self._route_cells(source.points))
-                failed += 1
 
         self.layout_model.wires = new_wires
         self.selected.clear()
         self.layoutChanged.emit()
         self.selectionChanged.emit()
         self.update()
-        return routed, failed, added_vias
+        return routed, failed, added_vias, moved_components
 
     def _draw_components(self, painter: QPainter, *, ghost: bool) -> None:
         for i, comp in enumerate(self.layout_model.components):
@@ -1563,18 +1939,29 @@ class BoardView(QWidget):
         if start == grid:
             self.statusMessage.emit("Choose a different destination hole for the suggested route.")
             return
-        route = self._suggest_route(start, grid)
-        if not route or len(route) < 2:
-            self.statusMessage.emit("No safe route found without crossing component bodies.")
+        segments, via_points = self._suggest_route_plan(start, grid)
+        if not segments:
+            detail = " using the current side and the other side" if self.allow_route_suggestion_cross_side else " on the current side"
+            self.statusMessage.emit(f"No safe route found{detail} without crossing component bodies.")
             self.update()
             return
         self.beforeLayoutChange.emit("Suggest route")
-        self.layout_model.wires.append(Wire("", route, self.current_wire_color, side=self.side))
-        self.selected = {("wire", len(self.layout_model.wires)-1)}
+        added_vias = 0
+        for point in via_points:
+            if not self._via_exists(point):
+                self.layout_model.vias.append(Via(point[0], point[1], color=self.current_wire_color))
+                added_vias += 1
+        first_wire_index = len(self.layout_model.wires)
+        for route, side in segments:
+            self.layout_model.wires.append(Wire("", route, self.current_wire_color, side=side))
+        self.selected = {("wire", idx) for idx in range(first_wire_index, len(self.layout_model.wires))}
         self.route_suggestion_points.clear()
         self.route_suggestion_active = False
         self.layoutChanged.emit(); self.selectionChanged.emit(); self.update()
-        self.statusMessage.emit("Suggested wire added.")
+        if via_points:
+            self.statusMessage.emit(f"Suggested cross-side wire added with {added_vias} new via{'s' if added_vias != 1 else ''}.")
+        else:
+            self.statusMessage.emit("Suggested wire added.")
 
     def _handle_wire_click(self, grid: GridPoint, modifiers) -> None:
         if not self.temp_wire:
