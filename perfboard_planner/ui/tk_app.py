@@ -1426,8 +1426,8 @@ class PerfboardPlanner(tk.Tk):
         info = ttk.Label(
             win,
             text=(
-                "Click cells to toggle component attachment pins.\n"
-                "Rows/columns are relative to the component's top-left hole.\n"
+                "Click a pin to select it, then click an empty cell to move it.\n"
+                "Ctrl-click an empty cell to add a new pin. Rows/columns are relative to the component's top-left hole.\n"
                 "Cells outside the yellow body area are external leads/pins."
             ),
             justify=tk.LEFT,
@@ -1568,17 +1568,34 @@ class PerfboardPlanner(tk.Tk):
                     return row, col
             return None
 
+        def selected_pin_name() -> Optional[str]:
+            pos = selected_pos[0]
+            if pos is None:
+                return None
+            return pin_map.get(pos)
+
+        def add_new_pin(pos: Tuple[int, int]) -> None:
+            pin_map[pos] = next_pin_name()
+            selected_pos[0] = pos
+
+        def move_selected_pin(pos: Tuple[int, int]) -> bool:
+            name = selected_pin_name()
+            old_pos = selected_pos[0]
+            if name is None or old_pos is None or pos in pin_map:
+                return False
+            del pin_map[old_pos]
+            pin_map[pos] = name
+            selected_pos[0] = pos
+            return True
+
         def on_editor_click(event):
             pos = canvas_to_cell(event.x, event.y)
             if pos is None:
                 return
-            selected_pos[0] = pos
             if pos in pin_map:
-                old_name = pin_map[pos]
-                del pin_map[pos]
-                jumper_list[:] = [j for j in jumper_list if j.pin_a != old_name and j.pin_b != old_name]
-            else:
-                pin_map[pos] = next_pin_name()
+                selected_pos[0] = pos
+            elif event.state & 0x0004 or not move_selected_pin(pos):
+                add_new_pin(pos)
             draw_editor()
 
         def on_list_select(event=None):
@@ -1608,6 +1625,17 @@ class PerfboardPlanner(tk.Tk):
                     jumper.pin_a = new_name
                 if jumper.pin_b == old_name:
                     jumper.pin_b = new_name
+            draw_editor()
+
+        def remove_selected_pin():
+            pos = selected_pos[0]
+            if pos is None or pos not in pin_map:
+                messagebox.showinfo("Remove pin", "Select a pin first.", parent=win)
+                return
+            old_name = pin_map[pos]
+            del pin_map[pos]
+            jumper_list[:] = [j for j in jumper_list if j.pin_a != old_name and j.pin_b != old_name]
+            selected_pos[0] = None
             draw_editor()
 
         def clear_pins():
@@ -1689,8 +1717,8 @@ class PerfboardPlanner(tk.Tk):
         pin_list.bind("<<ListboxSelect>>", on_list_select)
 
         ttk.Button(editor, text="Rename selected", command=rename_selected).grid(row=2, column=1, sticky="ew", pady=(8, 2))
-        ttk.Button(editor, text="Clear pins", command=clear_pins).grid(row=3, column=1, sticky="ew", pady=2)
-        ttk.Separator(editor).grid(row=4, column=1, sticky="ew", pady=6)
+        ttk.Button(editor, text="Remove selected", command=remove_selected_pin).grid(row=3, column=1, sticky="ew", pady=2)
+        ttk.Button(editor, text="Clear pins", command=clear_pins).grid(row=4, column=1, sticky="ew", pady=2)
         ttk.Button(editor, text="2-pin horizontal", command=set_two_pin_horizontal).grid(row=5, column=1, sticky="ew", pady=2)
         ttk.Button(editor, text="4 corners", command=set_four_corners).grid(row=9, column=1, sticky="ew", pady=(8, 2))
         ttk.Button(editor, text="DIP sides", command=set_dip_sides).grid(row=10, column=1, sticky="ew", pady=2)
@@ -3224,14 +3252,20 @@ class PerfboardPlanner(tk.Tk):
                 dr, dc = self.clamp_delta_for_bounds((min(rows), min(cols), max(rows), max(cols)), dr, dc)
 
         changed = False
+        substitutions_by_side: Dict[str, Dict[Tuple[int, int], Tuple[int, int]]] = {}
+        selected_wire_indexes = set(getattr(self, "drag_wire_originals", {}).keys())
         for index, (orig_row, orig_col) in self.drag_component_originals.items():
             if not (0 <= index < len(self.components)):
                 continue
             comp = self.components[index]
+            old_row, old_col = comp.row, comp.col
             new_row = orig_row + dr
             new_col = orig_col + dc
             if (comp.row, comp.col) != (new_row, new_col):
                 comp.row, comp.col = new_row, new_col
+                substitutions_by_side.setdefault(comp.side, {}).update(
+                    self.component_pin_substitutions(comp, old_row, old_col, comp.row, comp.col)
+                )
                 changed = True
         for index, pts in self.drag_wire_originals.items():
             if not (0 <= index < len(self.wires)):
@@ -3239,6 +3273,9 @@ class PerfboardPlanner(tk.Tk):
             new_pts = [(r + dr, c + dc) for r, c in pts]
             if self.wires[index].points != new_pts:
                 self.wires[index].points = new_pts
+                changed = True
+        for side, substitutions in substitutions_by_side.items():
+            if self.move_wire_endpoints_for_pin_substitutions(side, substitutions, selected_wire_indexes):
                 changed = True
         if changed:
             self.redraw()
@@ -3460,7 +3497,32 @@ class PerfboardPlanner(tk.Tk):
         self.clipboard_paste_count = 0
         return self.paste_component()
 
+    def component_pin_points_at(self, comp: Component, row: int, col: int) -> Dict[str, Tuple[int, int]]:
+        return {pin.name: (int(row + pin.row), int(col + pin.col)) for pin in self.normalized_pins(comp.pins, comp.width, comp.height)}
+
+    def component_pin_substitutions(self, comp: Component, old_row: int, old_col: int, new_row: int, new_col: int) -> Dict[Tuple[int, int], Tuple[int, int]]:
+        old_pins = self.component_pin_points_at(comp, old_row, old_col)
+        new_pins = self.component_pin_points_at(comp, new_row, new_col)
+        return {old_pins[name]: new_pins[name] for name in old_pins.keys() & new_pins.keys()}
+
+    def move_wire_endpoints_for_pin_substitutions(self, side: str, substitutions: Dict[Tuple[int, int], Tuple[int, int]], skip_wire_indexes: Optional[set] = None) -> bool:
+        if not substitutions:
+            return False
+        skip_wire_indexes = skip_wire_indexes or set()
+        changed = False
+        for index, wire in enumerate(self.wires):
+            if index in skip_wire_indexes or getattr(wire, "locked", False) or wire.side != side or len(wire.points) < 2:
+                continue
+            updated = list(wire.points)
+            updated[0] = substitutions.get(updated[0], updated[0])
+            updated[-1] = substitutions.get(updated[-1], updated[-1])
+            if updated != wire.points:
+                wire.points = updated
+                changed = True
+        return changed
+
     def rotate_component_90_clockwise(self, comp: Component):
+        old_pin_points = self.component_pin_points_at(comp, comp.row, comp.col)
         old_h = int(comp.height)
         old_w = int(comp.width)
         new_pins = []
@@ -3471,6 +3533,9 @@ class PerfboardPlanner(tk.Tk):
         comp.pins = self.normalized_pins(new_pins, comp.width, comp.height)
         comp.jumpers = self.normalized_jumpers(comp.jumpers, comp.pins)
         comp.row, comp.col = self.clamp_component_position(comp, comp.row, comp.col)
+        new_pin_points = self.component_pin_points_at(comp, comp.row, comp.col)
+        substitutions = {old_pin_points[name]: new_pin_points[name] for name in old_pin_points.keys() & new_pin_points.keys()}
+        self.move_wire_endpoints_for_pin_substitutions(comp.side, substitutions)
 
     def rotate_selected_components(self, event=None):
         if event is not None and self.event_from_text_input(event):
